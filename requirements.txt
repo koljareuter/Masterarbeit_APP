@@ -2,3 +2,4 @@ astroquery
 streamlit
 plotly
 pandas
+photutils
