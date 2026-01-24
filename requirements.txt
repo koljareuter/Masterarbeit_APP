@@ -4,3 +4,5 @@ plotly
 pandas
 photutils
 matplotlib
+numpy
+scipy
