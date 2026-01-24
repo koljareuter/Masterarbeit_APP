@@ -1,4 +1,7 @@
-astroquery
+# Example - replace with the versions from your 'pip show' output
+numpy==1.26.4
+astropy==6.0.0
+astroquery==0.4.7
 streamlit
 plotly
 pandas
