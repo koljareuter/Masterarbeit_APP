@@ -1,2 +1,4 @@
 astroquery
 streamlit
+plotly
+pandas
