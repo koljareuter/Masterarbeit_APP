@@ -2516,7 +2516,7 @@ if st.session_state.show_tools and col_right:
 
 
             # --- C. MODULES (Card Style) ---
-            with st.container(border=True):
+            '''with st.container(border=True):
                 st.markdown("##### 🚀 Launchers")
                 
                 # Detect if running on Streamlit Cloud
@@ -2545,7 +2545,7 @@ if st.session_state.show_tools and col_right:
                     run_script("w80_gui copy.py", "Kinematik GUI")
                     
                 if st.button("🔭 Ergebnisse GUI", width='stretch', help="View Final Results"): 
-                    run_script("program_runner.py", "Ergebnisse GUI")
+                    run_script("program_runner.py", "Ergebnisse GUI")'''
 
             st.write("") # Small spacer
             # Only works if your streamlit version is >= 1.30
