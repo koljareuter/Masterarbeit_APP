@@ -1297,16 +1297,26 @@ with col_main:
                     
                     P = np.broadcast_to(psf_profile, flux_cube_raw.shape)
                     safe_noise = np.where(noise_cube_raw <= 0, np.inf, noise_cube_raw)
-                    inv_var = 1.0 / (safe_noise**2)
+                    variance = safe_noise**2
+                    inv_var = 1.0 / variance
                     
+                    # Optimal extraction: flux = sum(P * F / var) / sum(P^2 / var)
                     num = np.nansum(flux_cube_raw * P * inv_var, axis=(1,2))
                     denom = np.nansum((P**2) * inv_var, axis=(1,2))
                     
                     with np.errstate(divide='ignore', invalid='ignore'):
                         spec_flux = np.divide(num, denom)
-                        spec_noise = np.divide(1.0, np.sqrt(denom))
-                    spec_flux = np.nan_to_num(spec_flux)
-                    spec_noise = np.nan_to_num(spec_noise)
+                        # Noise for optimal extraction: sigma = 1 / sqrt(sum(P^2 / var))
+                        # But we need to scale it to match the flux units
+                        spec_noise = np.sqrt(np.divide(1.0, denom))
+                    
+                    # Replace inf/nan with reasonable values instead of zero
+                    spec_flux = np.nan_to_num(spec_flux, nan=0.0, posinf=0.0, neginf=0.0)
+                    # For noise, use median of valid noise values as fallback
+                    median_noise = np.nanmedian(spec_noise[np.isfinite(spec_noise) & (spec_noise > 0)])
+                    if not np.isfinite(median_noise) or median_noise <= 0:
+                        median_noise = np.nanmedian(np.abs(spec_flux)) * 0.1  # 10% of flux as fallback
+                    spec_noise = np.where(np.isfinite(spec_noise) & (spec_noise > 0), spec_noise, median_noise)
                     
                 else:
                     # 2. STANDARD APERTURE MEAN
@@ -1332,21 +1342,28 @@ with col_main:
                 # 1. Flux Trace
                 if display_mode == "Flux":
                     y_data = spec_flux 
+                    
+                    # Add noise band FIRST (so it appears behind the flux line)
+                    # Check if noise is valid (not all zeros or ones)
+                    noise_valid = np.any(spec_noise > 0) and np.any(spec_noise != 1.0) and np.nanmax(spec_noise) > 1e-10
+                    if noise_valid:
+                        fig_spec.add_trace(go.Scatter(
+                            x=np.concatenate([wave_plot, wave_plot[::-1]]),
+                            y=np.concatenate([spec_flux + spec_noise, (spec_flux - spec_noise)[::-1]]),
+                            fill='toself', 
+                            fillcolor='rgba(100, 150, 200, 0.3)',  # More visible blue-gray
+                            line=dict(color='rgba(100, 150, 200, 0.5)', width=0.5),
+                            name='Noise (±1σ)',
+                            hoverinfo='skip'
+                        ))
+                    
+                    # Add flux line on top
                     fig_spec.add_trace(go.Scatter(
                         x=wave_plot, y=spec_flux, 
                         mode='lines', 
                         line=dict(color='#00CCFF', width=1.5), 
                         name='Flux',
                         hovertemplate='%{y:.2f} 10⁻¹⁷ W/m²/µm<extra></extra>'
-                    ))
-                    fig_spec.add_trace(go.Scatter(
-                        x=np.concatenate([wave_plot, wave_plot[::-1]]),
-                        y=np.concatenate([spec_flux + spec_noise, (spec_flux - spec_noise)[::-1]]),
-                        fill='toself', 
-                        fillcolor='rgba(128,128,128,0.2)', 
-                        line=dict(color='rgba(0,0,0,0)'),
-                        name='Noise (±1σ)',
-                        hoverinfo='skip'
                     ))
                 
                 # 2. SNR Trace
@@ -1802,13 +1819,15 @@ with col_main:
                             )
                             
                             # --- TOP SUBPLOT: Spectrum ---
-                            # Noise Shading
+                            # Noise Shading (added first so it's behind data)
                             mask = np.isfinite(raw_spec) & np.isfinite(raw_noise)
-                            fig_combined.add_trace(go.Scatter(
-                                x=np.concatenate([wave_rest[mask], wave_rest[mask][::-1]]),
-                                y=np.concatenate([(raw_spec + raw_noise)[mask], (raw_spec - raw_noise)[mask][::-1]]),
-                                fill='toself', fillcolor='rgba(128, 128, 128, 0.2)', line=dict(color='rgba(0,0,0,0)'), name='Noise (±1σ)', hoverinfo='skip'
-                            ), row=1, col=1)
+                            noise_valid = np.any(raw_noise[mask] > 0) and np.nanmax(raw_noise[mask]) > 1e-10
+                            if noise_valid:
+                                fig_combined.add_trace(go.Scatter(
+                                    x=np.concatenate([wave_rest[mask], wave_rest[mask][::-1]]),
+                                    y=np.concatenate([(raw_spec + raw_noise)[mask], (raw_spec - raw_noise)[mask][::-1]]),
+                                    fill='toself', fillcolor='rgba(100, 150, 200, 0.3)', line=dict(color='rgba(100, 150, 200, 0.5)', width=0.5), name='Noise (±1σ)', hoverinfo='skip'
+                                ), row=1, col=1)
 
                             # Data and Main Fit Lines (Always visible)
                             fig_combined.add_trace(go.Scatter(x=wave_rest, y=raw_spec, mode='lines', line=dict(color='white', width=1.5), name='Data'), row=1, col=1)
@@ -2497,27 +2516,36 @@ if st.session_state.show_tools and col_right:
 
 
             # --- C. MODULES (Card Style) ---
-            #with st.container(border=True):
-                # st.markdown("##### 🚀 Launchers")
+            with st.container(border=True):
+                st.markdown("##### 🚀 Launchers")
                 
-                # def run_script(script_name, label):
-                #     if os.path.exists(script_name):
-                #         try:
-                #             subprocess.Popen([sys.executable, script_name, fits_file_path])
-                #             st.toast(f"🚀 {label} launched!", icon="✅")
-                #         except Exception as e: st.error(f"Failed: {e}")
-                #     else: st.error(f"Script '{script_name}' not found.")
+                # Detect if running on Streamlit Cloud
+                is_cloud = os.environ.get('STREAMLIT_SHARING_MODE') or os.path.exists('/mount/src')
+                
+                if is_cloud:
+                    st.warning("⚠️ PyQt apps cannot run on Streamlit Cloud. Use these launchers when running locally.", icon="🖥️")
+                
+                def run_script(script_name, label):
+                    if is_cloud:
+                        st.error("🚫 Desktop apps require local execution. Run `streamlit run Streamlit_overview.py` on your machine.")
+                        return
+                    if os.path.exists(script_name):
+                        try:
+                            subprocess.Popen([sys.executable, script_name, fits_file_path])
+                            st.toast(f"🚀 {label} launched!", icon="✅")
+                        except Exception as e: st.error(f"Failed: {e}")
+                    else: st.error(f"Script '{script_name}' not found.")
 
-                # # Using columns for buttons to make them look like a grid or full width
-                # # Here we stick to full width for readability
-                # if st.button("📊 Stacked Spectra", width='stretch', help="Open Spectral Stacking GUI"): 
-                #     run_script("GUI_stacked_spectra.py", "Stacked Spectra")
+                # Using columns for buttons to make them look like a grid or full width
+                # Here we stick to full width for readability
+                if st.button("📊 Stacked Spectra", width='stretch', help="Open Spectral Stacking GUI"): 
+                    run_script("GUI_stacked_spectra.py", "Stacked Spectra")
                     
-                # if st.button("🌀 Kinematik GUI", width='stretch', help="Open W80 & Velocity Analysis"): 
-                #     run_script("w80_gui copy.py", "Kinematik GUI")
+                if st.button("🌀 Kinematik GUI", width='stretch', help="Open W80 & Velocity Analysis"): 
+                    run_script("w80_gui copy.py", "Kinematik GUI")
                     
-                # if st.button("🔭 Ergebnisse GUI", width='stretch', help="View Final Results"): 
-                #     run_script("program_runner.py", "Ergebnisse GUI")
+                if st.button("🔭 Ergebnisse GUI", width='stretch', help="View Final Results"): 
+                    run_script("program_runner.py", "Ergebnisse GUI")
 
             st.write("") # Small spacer
             # Only works if your streamlit version is >= 1.30
