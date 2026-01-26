@@ -2497,7 +2497,7 @@ if st.session_state.show_tools and col_right:
 
 
             # --- C. MODULES (Card Style) ---
-            with st.container(border=True):
+            #with st.container(border=True):
                 # st.markdown("##### 🚀 Launchers")
                 
                 # def run_script(script_name, label):
