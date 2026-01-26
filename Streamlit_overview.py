@@ -2195,7 +2195,7 @@ if st.session_state.show_tools and col_right:
                                 if not cur_whan.empty:
                                     cx = float(cur_whan.iloc[0]['log_NII_HA'])
                                     cy = float(cur_whan.iloc[0]['EW_HA'])
-                                    if np.isfinite(cx) and np.isfinite(cy):
+                                    if np.isfinite(float(cx)) and np.isfinite(float(cy)):
                                         ax_whan.scatter(cx, cy, s=200, facecolors='none', edgecolors='yellow', linewidth=3, zorder=10)
                                         ax_whan.annotate('YOU', xy=(cx, cy), xytext=(cx + 0.15, cy * 1.5),
                                                         arrowprops=dict(arrowstyle='->', color='yellow'), 
