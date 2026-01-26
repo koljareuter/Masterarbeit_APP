@@ -627,7 +627,7 @@ def calculate_best_fit_maps(results_file_path, fits_file_path):
 
 from scipy.ndimage import gaussian_filter
 
-def plot_interactive_map(data, title, cmap='plasma', selected_point=None, key_id=None, blur_sigma=0):
+def plot_interactive_map(data, title, cmap='plasma', selected_point=None, key_id=None, blur_sigma=0, units=''):
     """
     Creates an interactive Plotly Heatmap with clickable pixels.
     Uses invisible scatter points overlay for reliable click detection.
@@ -657,13 +657,16 @@ def plot_interactive_map(data, title, cmap='plasma', selected_point=None, key_id
     else:
         zmin, zmax = None, None
     
+    # Colorbar title with units
+    colorbar_title = units if units else ''
+    
     # 3. Heatmap (visual layer)
     fig.add_trace(go.Heatmap(
         z=data_plot, 
         colorscale=cmap, 
         showscale=True,
         zmin=zmin, zmax=zmax,
-        colorbar=dict(thickness=8, len=0.8, tickfont=dict(color='white', size=9), outlinewidth=0),
+        colorbar=dict(thickness=8, len=0.8, tickfont=dict(color='white', size=9), outlinewidth=0, title=dict(text=colorbar_title, font=dict(color='white', size=9))),
         hoverinfo='skip',  # Disable hover on heatmap
     ))
     
@@ -1512,6 +1515,22 @@ with col_main:
                         std_options["⭐ Best Flux"] = "COMP_FLUX"
                         std_options["⭐ Best Velocity"] = "COMP_VEL"
                         std_options["⭐ W80"] = "COMP_W80"
+                        
+                        # Units for map colorbars
+                        def get_map_units(label, key):
+                            """Get appropriate units for map colorbar."""
+                            if 'Flux' in label or key == 'COMP_FLUX' or key.startswith('A'):
+                                return '[erg/s/cm²]'
+                            elif 'Velocity' in label or key == 'COMP_VEL' or key.startswith('C'):
+                                return '[km/s]'
+                            elif 'W80' in label or key == 'COMP_W80':
+                                return '[km/s]'
+                            elif 'Sigma' in label or key.startswith('B'):
+                                return '[km/s]'
+                            elif 'CHI' in key.upper():
+                                return ''
+                            else:
+                                return ''
 
                         HA_REST, C_LIGHT = 0.65628, 299792.458
                         def get_d(k):
@@ -1550,7 +1569,7 @@ with col_main:
                         with m1:
                             l1 = st.selectbox("Map 1", list(std_options.keys()), index=list(std_options.keys()).index("⭐ Best Flux") if "⭐ Best Flux" in std_options else 0, key=f"s1_{selected_galaxy_name}")
                             d1 = get_d(std_options[l1])
-                            sel1 = plot_interactive_map(d1, l1, 'Plasma', (cx, cy), f"p1_{l1}", blur_sigma=sigma_val)
+                            sel1 = plot_interactive_map(d1, l1, 'Plasma', (cx, cy), f"p1_{l1}", blur_sigma=sigma_val, units=get_map_units(l1, std_options[l1]))
 
                         with m2:
                             l2 = st.selectbox("Map 2", list(std_options.keys()), index=list(std_options.keys()).index("⭐ W80") if "⭐ W80" in std_options else 0, key=f"s2_{selected_galaxy_name}")
@@ -1575,7 +1594,7 @@ with col_main:
                                 # 2. Heatmap (visual)
                                 fig_w80.add_trace(go.Heatmap(
                                     z=d2, colorscale='Oranges', zmin=zmin, zmax=zmax, showscale=True,
-                                    colorbar=dict(thickness=8, len=0.8, tickfont=dict(color='white', size=9), outlinewidth=0),
+                                    colorbar=dict(thickness=8, len=0.8, tickfont=dict(color='white', size=9), outlinewidth=0, title=dict(text='[km/s]', font=dict(color='white', size=9))),
                                     hoverinfo='skip'
                                 ))
                                 
@@ -1651,14 +1670,14 @@ with col_main:
                                     config={'displayModeBar': False}, on_select="rerun", 
                                     selection_mode="points", key=w80_map_key)
                             else:
-                                sel2 = plot_interactive_map(d2, l2, 'Plasma', (cx, cy), f"p2_{l2}", blur_sigma=sigma_val)
+                                sel2 = plot_interactive_map(d2, l2, 'Plasma', (cx, cy), f"p2_{l2}", blur_sigma=sigma_val, units=get_map_units(l2, std_options[l2]))
 
                         with m3:
                             l3 = st.selectbox("Map 3", list(std_options.keys()), index=list(std_options.keys()).index("⭐ Best Velocity") if "⭐ Best Velocity" in std_options else 0, key=f"s3_{selected_galaxy_name}")
                             k3 = std_options[l3]
                             d3 = get_d(k3)
                             cm3 = 'Spectral_r' if any(x in l3.upper() for x in ['VELOCITY', 'VEL', 'C']) else 'Plasma'
-                            sel3 = plot_interactive_map(d3, l3, cm3, (cx, cy), f"p3_{l3}", blur_sigma=sigma_val)
+                            sel3 = plot_interactive_map(d3, l3, cm3, (cx, cy), f"p3_{l3}", blur_sigma=sigma_val, units=get_map_units(l3, k3))
 
                         # --- COORDINATE INPUTS - These are the source of truth ---
                         c_in1, c_in2 = st.columns(2)
@@ -1864,6 +1883,17 @@ with col_main:
                 'Dust (Av)': 'SED_AV'
             }
             
+            # Units for each quantity
+            units = {
+                'Stellar Mass (LMSTAR)': '[log(M☉)]',
+                'SFR': '[M☉/yr]',
+                'Redshift': '',
+                'Velocity Disp. (σ)': '[km/s]',
+                'Hα Flux': '[erg/s/cm²]',
+                'V-Band (Rest)': '[mag]',
+                'Dust (Av)': '[mag]'
+            }
+            
             # 2. Controls (Selectbox + Log Button)
             c_ctrl1, c_ctrl2, c_ctrl3 = st.columns(3)
             
@@ -1891,7 +1921,7 @@ with col_main:
             plot_df = df_catalog.dropna(subset=[x_col, y_col]).copy()
             
             # --- APPLY LOG LOGIC (Corrected) ---
-            def get_data_and_label(df, col, label, is_log):
+            def get_data_and_label(df, col, label, is_log, unit=''):
                 data = df[col]
                 final_label = label
                 
@@ -1905,13 +1935,27 @@ with col_main:
                     # This ensures .loc[idx] works later
                     data = pd.Series(vals, index=df.index)
                     
-                    final_label = f"Log({label})"
+                    # Update label with log and adjust units
+                    if unit:
+                        # For log scale, units become log of original
+                        if '[log(' in unit:
+                            final_label = f"Log({label}) {unit}"
+                        else:
+                            final_label = f"Log({label}) [log{unit[:-1]}]" if unit.endswith(']') else f"Log({label})"
+                    else:
+                        final_label = f"Log({label})"
+                else:
+                    # Add unit to label
+                    if unit:
+                        final_label = f"{label} {unit}"
+                    else:
+                        final_label = label
                 
                 return data, final_label
 
-            x_data, x_title = get_data_and_label(plot_df, x_col, x_axis_label, x_log)
-            y_data, y_title = get_data_and_label(plot_df, y_col, y_axis_label, y_log)
-            c_data, c_title = get_data_and_label(plot_df, c_col, c_axis_label, c_log)
+            x_data, x_title = get_data_and_label(plot_df, x_col, x_axis_label, x_log, units.get(x_axis_label, ''))
+            y_data, y_title = get_data_and_label(plot_df, y_col, y_axis_label, y_log, units.get(y_axis_label, ''))
+            c_data, c_title = get_data_and_label(plot_df, c_col, c_axis_label, c_log, units.get(c_axis_label, ''))
             
             # 4. Find Galaxy
             clean_id = selected_galaxy_name.strip()
@@ -2050,6 +2094,17 @@ if st.session_state.show_tools and col_right:
                             'V-Band (Rest)': 'RF_V',
                             'Dust (Av)': 'SED_AV'
                         }
+                        
+                        # Units for each quantity
+                        units = {
+                            'Stellar Mass (LMSTAR)': '[log(M☉)]',
+                            'SFR': '[M☉/yr]',
+                            'Redshift': '',
+                            'Velocity Disp. (σ)': '[km/s]',
+                            'Hα Flux': '[erg/s/cm²]',
+                            'V-Band (Rest)': '[mag]',
+                            'Dust (Av)': '[mag]'
+                        }
 
                         # Get Selections (Defaults if not set)
                         x_lbl = st.session_state.get('qp_x', 'Stellar Mass (LMSTAR)')
@@ -2059,6 +2114,10 @@ if st.session_state.show_tools and col_right:
                         
                         x_key = base_cols.get(x_lbl, 'LMSTAR')
                         y_key = base_cols.get(y_lbl, 'SFR')
+                        
+                        # Get units for display
+                        x_unit = units.get(x_lbl, '')
+                        y_unit = units.get(y_lbl, '')
 
                         # 2. Filter & Transform Data
                         # Helper function to safely get a single column (handles duplicate column names)
@@ -2080,11 +2139,29 @@ if st.session_state.show_tools and col_right:
                         # Apply Log if requested
                         if x_is_log:
                             ms_df[x_key] = np.log10(np.where(ms_df[x_key] > 0, ms_df[x_key], np.nan))
-                            x_lbl = f"Log({x_lbl})"
+                            # Update label with log and adjust units
+                            if x_unit and '[log(' in x_unit:
+                                x_lbl = f"Log({x_lbl}) {x_unit}"
+                            elif x_unit:
+                                x_lbl = f"Log({x_lbl}) [log{x_unit[:-1]}]" if x_unit.endswith(']') else f"Log({x_lbl})"
+                            else:
+                                x_lbl = f"Log({x_lbl})"
+                        else:
+                            if x_unit:
+                                x_lbl = f"{x_lbl} {x_unit}"
                         
                         if y_is_log:
                             ms_df[y_key] = np.log10(np.where(ms_df[y_key] > 0, ms_df[y_key], np.nan))
-                            y_lbl = f"Log({y_lbl})"
+                            # Update label with log and adjust units
+                            if y_unit and '[log(' in y_unit:
+                                y_lbl = f"Log({y_lbl}) {y_unit}"
+                            elif y_unit:
+                                y_lbl = f"Log({y_lbl}) [log{y_unit[:-1]}]" if y_unit.endswith(']') else f"Log({y_lbl})"
+                            else:
+                                y_lbl = f"Log({y_lbl})"
+                        else:
+                            if y_unit:
+                                y_lbl = f"{y_lbl} {y_unit}"
                             
                         ms_df = ms_df.dropna()
 
@@ -2277,9 +2354,31 @@ if st.session_state.show_tools and col_right:
                                     "⭐ Best Velocity": "COMP_VEL", 
                                     "⭐ W80": "COMP_W80"
                                 }
+                                # Units for histogram maps
+                                hist_units = {
+                                    "⭐ Best Flux": "[erg/s/cm²]",
+                                    "⭐ Best Velocity": "[km/s]",
+                                    "⭐ W80": "[km/s]",
+                                    "COMP_FLUX": "[erg/s/cm²]",
+                                    "COMP_VEL": "[km/s]",
+                                    "COMP_W80": "[km/s]"
+                                }
                                 for ext in map_ext_hist:
                                     if ext not in ['PRIMARY', 'BIN_NUM']:
                                         hist_options[ext] = ext
+                                        # Assign units based on extension name patterns
+                                        if 'VEL' in ext.upper() or ext.startswith('B') or ext.startswith('C'):
+                                            hist_units[ext] = "[km/s]"
+                                        elif 'FLUX' in ext.upper() or 'HA' in ext.upper() or 'NII' in ext.upper() or 'OIII' in ext.upper():
+                                            hist_units[ext] = "[erg/s/cm²]"
+                                        elif 'SIG' in ext.upper() or 'W80' in ext.upper():
+                                            hist_units[ext] = "[km/s]"
+                                        elif 'EW' in ext.upper():
+                                            hist_units[ext] = "[Å]"
+                                        elif 'CHI' in ext.upper():
+                                            hist_units[ext] = ""
+                                        else:
+                                            hist_units[ext] = ""
                                 
                                 # Controls row
                                 c1, c2 = st.columns([2, 1])
@@ -2323,21 +2422,27 @@ if st.session_state.show_tools and col_right:
                                         
                                         mean_val, median_val = np.mean(clipped), np.median(clipped)
                                         
+                                        # Get unit for the selected map
+                                        x_unit_hist = hist_units.get(selected_hist_map, hist_units.get(map_key, ''))
+                                        x_title_hist = f"{selected_hist_map} {x_unit_hist}".strip()
+                                        
                                         fig_hist = go.Figure()
                                         fig_hist.add_trace(go.Histogram(x=clipped, nbinsx=35, marker_color='#00CCFF', opacity=0.75))
                                         fig_hist.add_vline(x=mean_val, line_color="yellow", line_width=1.5)
                                         fig_hist.add_vline(x=median_val, line_dash="dash", line_color="lime", line_width=1.5)
                                         
                                         fig_hist.update_layout(
-                                            height=180, margin=dict(l=35, r=5, t=5, b=30),
+                                            height=180, margin=dict(l=35, r=5, t=5, b=40),
                                             paper_bgcolor='rgba(0,0,0,0)', plot_bgcolor='#1E293B',
-                                            xaxis=dict(gridcolor='#334155', tickfont=dict(color='gray', size=8)),
-                                            yaxis=dict(type="log" if log_y else "linear", gridcolor='#334155', tickfont=dict(color='gray', size=8)),
+                                            xaxis=dict(title=dict(text=x_title_hist, font=dict(color='gray', size=9)), gridcolor='#334155', tickfont=dict(color='gray', size=8)),
+                                            yaxis=dict(title=dict(text="Count", font=dict(color='gray', size=9)), type="log" if log_y else "linear", gridcolor='#334155', tickfont=dict(color='gray', size=8)),
                                             showlegend=False
                                         )
                                         st.plotly_chart(fig_hist, use_container_width=True, config={'displayModeBar': False})
                                         
-                                        st.caption(f"μ={mean_val:.1f} | med={median_val:.1f} | σ={np.std(clipped):.1f} | n={len(clipped)}")
+                                        # Include units in the stats caption
+                                        unit_str = x_unit_hist.replace('[', '').replace(']', '') if x_unit_hist else ''
+                                        st.caption(f"μ={mean_val:.1f} {unit_str} | med={median_val:.1f} {unit_str} | σ={np.std(clipped):.1f} {unit_str} | n={len(clipped)}")
                                     else:
                                         st.caption("No valid data")
                                 else:
@@ -2374,17 +2479,17 @@ if st.session_state.show_tools and col_right:
                             fig_res.add_vline(x=mean_res, line_dash="dot", line_color="cyan", line_width=1.5)
                             
                             fig_res.update_layout(
-                                height=180, margin=dict(l=35, r=5, t=5, b=30),
+                                height=180, margin=dict(l=35, r=5, t=5, b=40),
                                 paper_bgcolor='rgba(0,0,0,0)', plot_bgcolor='#1E293B',
-                                xaxis=dict(range=[-x_range, x_range], gridcolor='#334155', tickfont=dict(color='gray', size=8)),
-                                yaxis=dict(type="log" if log_y_res else "linear", gridcolor='#334155', tickfont=dict(color='gray', size=8)),
+                                xaxis=dict(title=dict(text="Residuals [σ]", font=dict(color='gray', size=9)), range=[-x_range, x_range], gridcolor='#334155', tickfont=dict(color='gray', size=8)),
+                                yaxis=dict(title=dict(text="Count", font=dict(color='gray', size=9)), type="log" if log_y_res else "linear", gridcolor='#334155', tickfont=dict(color='gray', size=8)),
                                 showlegend=False
                             )
                             st.plotly_chart(fig_res, use_container_width=True, config={'displayModeBar': False})
                             
                             # Compact stats with quality indicator
                             q_col = "lime" if 0.8 < std_res < 1.2 else "orange" if 0.5 < std_res < 1.5 else "red"
-                            st.caption(f"μ={mean_res:.2f} | σ=<span style='color:{q_col}'>{std_res:.2f}</span> | n={len(clipped)}", unsafe_allow_html=True)
+                            st.caption(f"μ={mean_res:.2f} σ | σ=<span style='color:{q_col}'>{std_res:.2f}</span> | n={len(clipped)}", unsafe_allow_html=True)
                         else:
                             st.caption("No valid data")
                     else:
