@@ -2193,7 +2193,8 @@ if st.session_state.show_tools and col_right:
                                 # Highlight current galaxy
                                 cur_whan = whan_df[whan_df['ID'] == selected_galaxy_name]
                                 if not cur_whan.empty:
-                                    cx, cy = cur_whan.iloc[0]['log_NII_HA'], cur_whan.iloc[0]['EW_HA']
+                                    cx = float(cur_whan.iloc[0]['log_NII_HA'])
+                                    cy = float(cur_whan.iloc[0]['EW_HA'])
                                     if np.isfinite(cx) and np.isfinite(cy):
                                         ax_whan.scatter(cx, cy, s=200, facecolors='none', edgecolors='yellow', linewidth=3, zorder=10)
                                         ax_whan.annotate('YOU', xy=(cx, cy), xytext=(cx + 0.15, cy * 1.5),
