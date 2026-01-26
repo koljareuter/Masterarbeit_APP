@@ -2102,7 +2102,7 @@ if st.session_state.show_tools and col_right:
                                 if not cur.empty:
                                     cx, cy = cur.iloc[0][x_key], cur.iloc[0][y_key]
                                     # Check boundaries (in case log made it NaN or infinite)
-                                    if np.isfinite(cx) and np.isfinite(cy):
+                                    if np.isfinite(float(cx)) and np.isfinite(float(cy)):
                                         ax_x.scatter(cx, cy, s=200, facecolors='none', edgecolors='red', linewidth=2)
                                         ax_x.annotate('THIS ONE', xy=(cx, cy), xytext=(cx, cy + (ms_df[y_key].max() - ms_df[y_key].min())*0.1),
                                                     arrowprops=dict(arrowstyle='->', color='red'), color='red', fontsize=10)
