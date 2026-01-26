@@ -2100,9 +2100,14 @@ if st.session_state.show_tools and col_right:
                                 
                                 # Plot Selected
                                 if not cur.empty:
-                                    cx, cy = cur.iloc[0][x_key], cur.iloc[0][y_key]
+                                    # Use .values[0] to ensure scalar extraction (handles duplicate column names)
+                                    cx = cur[x_key].values[0] if hasattr(cur[x_key], 'values') else cur.iloc[0][x_key]
+                                    cy = cur[y_key].values[0] if hasattr(cur[y_key], 'values') else cur.iloc[0][y_key]
+                                    # Ensure we have scalars, not arrays
+                                    cx = float(cx) if not hasattr(cx, '__len__') or isinstance(cx, str) else float(cx[0]) if len(cx) > 0 else np.nan
+                                    cy = float(cy) if not hasattr(cy, '__len__') or isinstance(cy, str) else float(cy[0]) if len(cy) > 0 else np.nan
                                     # Check boundaries (in case log made it NaN or infinite)
-                                    if np.isfinite(float(cx)) and np.isfinite(float(cy)):
+                                    if np.isfinite(cx) and np.isfinite(cy):
                                         ax_x.scatter(cx, cy, s=200, facecolors='none', edgecolors='red', linewidth=2)
                                         ax_x.annotate('THIS ONE', xy=(cx, cy), xytext=(cx, cy + (ms_df[y_key].max() - ms_df[y_key].min())*0.1),
                                                     arrowprops=dict(arrowstyle='->', color='red'), color='red', fontsize=10)
@@ -2193,9 +2198,11 @@ if st.session_state.show_tools and col_right:
                                 # Highlight current galaxy
                                 cur_whan = whan_df[whan_df['ID'] == selected_galaxy_name]
                                 if not cur_whan.empty:
-                                    cx = float(cur_whan.iloc[0]['log_NII_HA'])
-                                    cy = float(cur_whan.iloc[0]['EW_HA'])
-                                    if np.isfinite(float(cx)) and np.isfinite(float(cy)):
+                                    cx_val = cur_whan['log_NII_HA'].values[0]
+                                    cy_val = cur_whan['EW_HA'].values[0]
+                                    cx = float(cx_val) if not hasattr(cx_val, '__len__') else float(cx_val[0]) if len(cx_val) > 0 else np.nan
+                                    cy = float(cy_val) if not hasattr(cy_val, '__len__') else float(cy_val[0]) if len(cy_val) > 0 else np.nan
+                                    if np.isfinite(cx) and np.isfinite(cy):
                                         ax_whan.scatter(cx, cy, s=200, facecolors='none', edgecolors='yellow', linewidth=3, zorder=10)
                                         ax_whan.annotate('YOU', xy=(cx, cy), xytext=(cx + 0.15, cy * 1.5),
                                                         arrowprops=dict(arrowstyle='->', color='yellow'), 
@@ -2231,7 +2238,9 @@ if st.session_state.show_tools and col_right:
                         
                         # Show current galaxy class
                         if not cur_whan.empty:
-                            st.caption(f"**{selected_galaxy_name}**: {cur_whan.iloc[0]['WHAN_CLS']}")
+                            whan_cls_val = cur_whan['WHAN_CLS'].values[0]
+                            whan_cls = str(whan_cls_val) if not hasattr(whan_cls_val, '__len__') or isinstance(whan_cls_val, str) else str(whan_cls_val[0]) if len(whan_cls_val) > 0 else 'Unknown'
+                            st.caption(f"**{selected_galaxy_name}**: {whan_cls}")
                     else:
                         st.caption("No WHAN data available")
 
