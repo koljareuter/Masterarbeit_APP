@@ -91,6 +91,7 @@ st.markdown("""
 DATA_PATH = "KMOS3D_ALL"
 RESULTS_PATH = "Gaussian_fits"
 PKL_PATH = "pkl_files"  # New path for pickle files
+CROSSMATCH_PATH = "crossmatch.fits"  # Crossmatch catalog with survey links
 
 # Ensure PKL directory exists
 os.makedirs(PKL_PATH, exist_ok=True)
@@ -306,7 +307,6 @@ def calculate_w80_map(results_file_path, fits_file_path):
 # --- AGN & SIMBAD HELPER FUNCTIONS ---
 # --- SIMBAD TYPE MAPPING ---
 # Maps SIMBAD short codes to readable names
-# --- SIMBAD TYPE MAPPING ---
 SIMBAD_OTYPE_MAPPING = {
     "AGN":    "Active Galaxy Nucleus",
     "QSO":    "Quasar",
@@ -355,7 +355,6 @@ def translate_simbad_types(type_list):
     return " | ".join(list(dict.fromkeys(translated)))
 
 # --- CLASSIFICATION HELPER FUNCTIONS ---
-@st.cache_data
 @st.cache_data
 def load_agn_catalog_ids(path="AGN_SAMPLE.fits"):
     """Loads AGN catalog IDs from the provided FITS file."""
@@ -468,6 +467,405 @@ def get_simbad_link_from_header(fits_path):
         return f"Err: {str(e)[:15]}"
 
 @st.cache_data
+def load_crossmatch_links(crossmatch_path=CROSSMATCH_PATH):
+    """
+    Load the LINKS table from the crossmatch FITS file.
+    Returns a DataFrame with KMOS3D_ID, matched flags, and URLs for all surveys.
+    Returns None if the file doesn't exist or can't be read.
+    """
+    if not os.path.exists(crossmatch_path):
+        return None
+    try:
+        with fits.open(crossmatch_path) as hdul:
+            # Try LINKS extension first
+            links_df = None
+            for ext in hdul:
+                if ext.name == 'LINKS':
+                    links_df = pd.DataFrame(ext.data)
+                    break
+            
+            if links_df is None:
+                return None
+            
+            # Decode byte strings from FITS
+            for col in links_df.columns:
+                if links_df[col].dtype == object:
+                    links_df[col] = links_df[col].apply(
+                        lambda x: x.decode('utf-8').strip() if isinstance(x, bytes) else str(x).strip()
+                    )
+            
+            # Clean up the KMOS3D_ID column for matching
+            if 'KMOS3D_ID' in links_df.columns:
+                links_df['KMOS3D_ID'] = links_df['KMOS3D_ID'].str.strip()
+            
+            return links_df
+    except Exception as e:
+        print(f"Error loading crossmatch: {e}")
+        return None
+
+
+def get_catalog_links_for_galaxy(galaxy_name, ra=None, dec=None, crossmatch_df=None):
+    """
+    Look up a galaxy in the crossmatch table and return its catalog links.
+    
+    Returns a dict: {survey_name: {'matched': bool, 'url': str}} 
+    Returns empty dict if no match found.
+    """
+    if crossmatch_df is None or crossmatch_df.empty:
+        return {}
+    
+    # --- 1. Try matching by KMOS3D_ID ---
+    row = None
+    if galaxy_name:
+        # Clean the galaxy name for matching
+        clean_name = galaxy_name.strip()
+        mask = crossmatch_df['KMOS3D_ID'] == clean_name
+        if mask.any():
+            row = crossmatch_df[mask].iloc[0]
+        else:
+            # Fuzzy: try case-insensitive
+            mask = crossmatch_df['KMOS3D_ID'].str.lower() == clean_name.lower()
+            if mask.any():
+                row = crossmatch_df[mask].iloc[0]
+    
+    # --- 2. Fallback: match by closest RA/DEC ---
+    if row is None and ra is not None and dec is not None:
+        try:
+            df_ra = pd.to_numeric(crossmatch_df['RA'], errors='coerce')
+            df_dec = pd.to_numeric(crossmatch_df['DEC'], errors='coerce')
+            # Simple angular distance in arcsec (small-angle approx is fine for <3")
+            cos_dec = np.cos(np.radians(dec))
+            dist_arcsec = 3600 * np.sqrt(
+                ((df_ra - ra) * cos_dec)**2 + (df_dec - dec)**2
+            )
+            min_idx = dist_arcsec.idxmin()
+            if dist_arcsec[min_idx] < 5.0:  # 5 arcsec tolerance
+                row = crossmatch_df.loc[min_idx]
+        except Exception:
+            pass
+    
+    if row is None:
+        return {}
+    
+    # --- 3. Extract survey links ---
+    # Survey display config: name → (matched_col, url_col, icon, display_name)
+    survey_display = {
+        'NED':     ('NED_MATCHED',     'NED_URL',     '🌐', 'NED'),
+        'SDSS':    ('SDSS_MATCHED',    'SDSS_URL',    '🔴', 'SDSS DR16'),
+        'WISE':    ('WISE_MATCHED',    'WISE_URL',    '🟡', 'AllWISE'),
+        '2MASS':   ('2MASS_MATCHED',   '2MASS_URL',   '🟠', '2MASS'),
+        'JWST':    ('JWST_MATCHED',    'JWST_URL',    '🔭', 'JWST/MAST'),
+        # Deep field surveys
+        'COS2020': ('COS2020_MATCHED', 'COS2020_URL', '🟣', 'COSMOS2020'),
+        'VLA3GHZ': ('VLA3GHZ_MATCHED', 'VLA3GHZ_URL', '📻', 'VLA 3GHz'),
+        'CCOSLEG': ('CCOSLEG_MATCHED', 'CCOSLEG_URL', '☢️', 'Chandra COSMOS'),
+        'CDFS7MS': ('CDFS7MS_MATCHED', 'CDFS7MS_URL', '☢️', 'CDF-S 7Ms'),
+        'VLACDFS': ('VLACDFS_MATCHED', 'VLACDFS_URL', '📻', 'VLA E-CDFS'),
+        'XUDS':    ('XUDS_MATCHED',    'XUDS_URL',    '☢️', 'X-UDS Chandra'),
+    }
+    
+    links = {}
+    for survey, (match_col, url_col, icon, display_name) in survey_display.items():
+        matched = False
+        url = ''
+        
+        if match_col in row.index:
+            val = row[match_col]
+            matched = bool(val) if not isinstance(val, str) else val.lower() == 'true'
+        
+        if url_col in row.index:
+            url = str(row[url_col]).strip()
+            if url in ('', 'nan', 'None', '--'):
+                url = ''
+        
+        links[survey] = {
+            'matched': matched,
+            'url': url,
+            'icon': icon,
+            'display_name': display_name,
+        }
+    
+    # Add SIMBAD link (always present for every source)
+    simbad_url = ''
+    if 'SIMBAD_URL' in row.index:
+        simbad_url = str(row['SIMBAD_URL']).strip()
+        if simbad_url in ('', 'nan', 'None', '--'):
+            simbad_url = ''
+    links['SIMBAD'] = {
+        'matched': True,  # always a coordinate lookup
+        'url': simbad_url,
+        'icon': '🔵',
+        'display_name': 'SIMBAD',
+    }
+    
+    return links
+
+
+@st.cache_data
+def load_crossmatch_full(crossmatch_path=CROSSMATCH_PATH):
+    """
+    Load full crossmatch data from all survey HDUs in the crossmatch FITS.
+    Returns a merged DataFrame with WISE magnitudes, NED data, JWST info etc.
+    keyed by KMOS3D_ID.
+    """
+    if not os.path.exists(crossmatch_path):
+        return None
+    try:
+        merged = None
+        with fits.open(crossmatch_path) as hdul:
+            # Load from each survey HDU and merge by KMOS3D_ID
+            for ext in hdul:
+                if ext.name in ('PRIMARY', 'SUMMARY', 'LINKS'):
+                    continue
+                if not hasattr(ext, 'data') or ext.data is None:
+                    continue
+                try:
+                    df = pd.DataFrame(ext.data)
+                    # Decode byte strings
+                    for col in df.columns:
+                        if df[col].dtype == object:
+                            df[col] = df[col].apply(
+                                lambda x: x.decode('utf-8').strip() if isinstance(x, bytes) else str(x).strip()
+                            )
+                    
+                    if ext.name in ('KMOS3D_S', 'KMOS3D_SOURCES', 'KMOS3D_SO'):  # handle FITS name truncation
+                        merged = df.copy()
+                    elif merged is not None and 'KMOS3D_ID' in df.columns:
+                        # Strip _MATCH suffix to get clean survey prefix
+                        survey_prefix = re.sub(r'_M(?:ATCH|ATC|AT|A)?$', '', ext.name) + '_'
+                        rename_map = {}
+                        for col in df.columns:
+                            if col not in ('KMOS3D_ID', 'KMOS3D_RA', 'KMOS3D_DEC'):
+                                rename_map[col] = survey_prefix + col
+                        df_renamed = df.rename(columns=rename_map)
+                        merged = merged.merge(
+                            df_renamed.drop(columns=['KMOS3D_RA', 'KMOS3D_DEC'], errors='ignore'),
+                            left_on='OBJECT', right_on='KMOS3D_ID', how='left'
+                        )
+                        if 'KMOS3D_ID' in merged.columns:
+                            merged.drop(columns=['KMOS3D_ID'], inplace=True, errors='ignore')
+                except Exception as e:
+                    print(f"Error reading HDU {ext.name}: {e}")
+                    continue
+        
+        if merged is not None:
+            # Convert numeric columns
+            for col in merged.columns:
+                if col in ('OBJECT', 'OBJ_TARG', 'RADECSYS', 'OBSBAND', 'VERSION',
+                           'INSTRUME', 'filename', 'filepath'):
+                    continue
+                try:
+                    merged[col] = pd.to_numeric(merged[col], errors='ignore')
+                except Exception:
+                    pass
+        
+        return merged
+    except Exception as e:
+        print(f"Error loading full crossmatch: {e}")
+        return None
+
+
+@st.cache_data(show_spinner="Computing fossil scores...", ttl=3600)
+def compute_fossil_scores(galaxy_list, sorted_galaxy_data, crossmatch_df,
+                          agn_ids, results_path):
+    """
+    Compute a Fossil AGN Outflow Score for each galaxy.
+    
+    HARD EXCLUSION:
+      Milliquas AGN OR SIMBAD AGN → Lit_AGN = True, Fossil_Score = 0
+    
+    Scoring (0–8 scale, higher = stronger fossil candidate):
+    
+    KINEMATIC EVIDENCE (0–3):
+      W80 > 600 km/s → 3  |  400–600 → 2  |  200–400 → 1  |  <200 → 0
+    
+    WHAN ABSENCE (0–1):
+      WHAN class is NOT AGN (sAGN/wAGN) → 1
+    
+    MID-IR FADING (0–2):
+      WISE W1−W2 < 0.5 → 2  |  0.5–0.8 → 1  |  ≥ 0.8 (AGN-like) → 0
+    
+    MISMATCH BONUS (0–2):
+      High W80 (≥400) AND low W1−W2 (<0.8) → 2
+      Moderate W80 (200–400) AND low W1−W2 (<0.8) → 1
+    
+    Deep radio/X-ray detections are tracked as INFORMATIONAL flags
+    (VLA 3GHz, VLA E-CDFS, CDF-S 7Ms, Chandra COSMOS, X-UDS)
+    but do NOT contribute to the score because detection at these
+    depths is expected for star-forming galaxies at z~1–2.
+    
+    Returns a DataFrame with ID, scores, and breakdown.
+    """
+    # Build W80 lookup from sorted galaxy data
+    w80_lookup = {}
+    for item in sorted_galaxy_data:
+        if isinstance(item, (list, tuple)) and len(item) >= 2:
+            w80_lookup[item[0]] = item[1]
+    
+    # Build WISE color lookups from crossmatch
+    wise_w1w2 = {}
+    wise_w2w3 = {}
+    has_deep_radio = {}   # informational only
+    has_deep_xray = {}    # informational only
+    if crossmatch_df is not None:
+        w1_col = next((c for c in crossmatch_df.columns if 'W1mag' in c), None)
+        w2_col = next((c for c in crossmatch_df.columns if 'W2mag' in c), None)
+        w3_col = next((c for c in crossmatch_df.columns if 'W3mag' in c), None)
+        id_col = 'OBJECT' if 'OBJECT' in crossmatch_df.columns else None
+        
+        # Find deep radio match columns (VLA 3GHz for COSMOS, VLA E-CDFS for GOODS-S)
+        radio_match_cols = [c for c in crossmatch_df.columns
+                           if ('VLA3G' in c or 'VLAGS' in c) and 'MATCHED' in c]
+        # Find deep X-ray match columns (Chandra COSMOS, CDF-S 7Ms, X-UDS)
+        xray_match_cols = [c for c in crossmatch_df.columns
+                          if ('CXCOS' in c or 'CDFS' in c or 'XUDS' in c) and 'MATCHED' in c]
+        
+        if id_col:
+            for _, row in crossmatch_df.iterrows():
+                gal_id = str(row[id_col]).strip()
+                # WISE colors
+                if w1_col and w2_col:
+                    try:
+                        w1 = float(row[w1_col])
+                        w2 = float(row[w2_col])
+                        if np.isfinite(w1) and np.isfinite(w2):
+                            wise_w1w2[gal_id] = w1 - w2
+                    except (ValueError, TypeError):
+                        pass
+                if w2_col and w3_col:
+                    try:
+                        w2_ = float(row[w2_col])
+                        w3 = float(row[w3_col])
+                        if np.isfinite(w2_) and np.isfinite(w3):
+                            wise_w2w3[gal_id] = w2_ - w3
+                    except (ValueError, TypeError):
+                        pass
+                # Deep radio detection (informational flag)
+                for rc in radio_match_cols:
+                    try:
+                        val = row[rc]
+                        if (bool(val) if not isinstance(val, str) else val.lower() == 'true'):
+                            has_deep_radio[gal_id] = True
+                    except Exception:
+                        pass
+                # Deep X-ray detection (informational flag)
+                for xc in xray_match_cols:
+                    try:
+                        val = row[xc]
+                        if (bool(val) if not isinstance(val, str) else val.lower() == 'true'):
+                            has_deep_xray[gal_id] = True
+                    except Exception:
+                        pass
+    
+    # Load WHAN and SIMBAD info from result headers (batch)
+    simbad_agn = {}
+    whan_agn = {}
+    for gal_name in galaxy_list:
+        res_path = os.path.join(results_path, f"{gal_name}_voronoi_binned.fits")
+        if os.path.exists(res_path):
+            try:
+                with fits.open(res_path) as hdul:
+                    hdr = hdul[0].header
+                    # SIMBAD
+                    sc = hdr.get('SIMBAD_CL', '')
+                    agn_kw = ['Active', 'Seyfert', 'Quasar', 'Blazar', 'BL Lac',
+                              'LINER', 'AGN', 'Sy1', 'Sy2', 'QSO', 'rG', 'AG?']
+                    simbad_agn[gal_name] = any(k.lower() in str(sc).lower() for k in agn_kw)
+                    # WHAN
+                    wc = str(hdr.get('WHAN_CLS', '')).upper()
+                    whan_agn[gal_name] = 'SAGN' in wc or 'WAGN' in wc or 'AGN' in wc
+            except Exception:
+                pass
+    
+    # Score each galaxy
+    rows = []
+    for gal_name in galaxy_list:
+        w80 = w80_lookup.get(gal_name, 0.0)
+        w1w2 = wise_w1w2.get(gal_name, np.nan)
+        
+        # --- HARD EXCLUSION: Literature AGN ---
+        is_mq = is_agn_galaxy(gal_name, agn_ids)
+        is_simbad = simbad_agn.get(gal_name, False)
+        is_lit_agn = is_mq or is_simbad
+        
+        is_whan = whan_agn.get(gal_name, False)
+        is_radio = has_deep_radio.get(gal_name, False)
+        is_xray = has_deep_xray.get(gal_name, False)
+        
+        if is_lit_agn:
+            rows.append({
+                'ID': gal_name,
+                'W80': round(w80, 1),
+                'W1_W2': round(w1w2, 3) if np.isfinite(w1w2) else np.nan,
+                'Lit_AGN': True,
+                'Milliquas': is_mq,
+                'SIMBAD_AGN': is_simbad,
+                'WHAN_AGN': is_whan,
+                'DeepRadio': is_radio,
+                'DeepXray': is_xray,
+                'Kin_Score': 0,
+                'WHAN_Score': 0,
+                'MIR_Score': 0,
+                'Mismatch': 0,
+                'Fossil_Score': 0,
+            })
+            continue
+        
+        # --- Kinematic score (0–3) ---
+        if w80 >= 600:
+            kin_score = 3
+        elif w80 >= 400:
+            kin_score = 2
+        elif w80 >= 200:
+            kin_score = 1
+        else:
+            kin_score = 0
+        
+        # --- WHAN absence (0–1) ---
+        whan_score = 0 if is_whan else 1
+        
+        # --- MID-IR fading (0–2) ---
+        if np.isfinite(w1w2):
+            if w1w2 < 0.5:
+                mir_score = 2
+            elif w1w2 < 0.8:
+                mir_score = 1
+            else:
+                mir_score = 0
+        else:
+            mir_score = 1  # no WISE data = neutral
+        
+        # --- Mismatch bonus (0–2) ---
+        mismatch = 0
+        if np.isfinite(w1w2) and w1w2 < 0.8:
+            if w80 >= 400:
+                mismatch = 2
+            elif w80 >= 200:
+                mismatch = 1
+        
+        total = kin_score + whan_score + mir_score + mismatch
+        
+        rows.append({
+            'ID': gal_name,
+            'W80': round(w80, 1),
+            'W1_W2': round(w1w2, 3) if np.isfinite(w1w2) else np.nan,
+            'Lit_AGN': False,
+            'Milliquas': is_mq,
+            'SIMBAD_AGN': is_simbad,
+            'WHAN_AGN': is_whan,
+            'DeepRadio': is_radio,
+            'DeepXray': is_xray,
+            'Kin_Score': kin_score,
+            'WHAN_Score': whan_score,
+            'MIR_Score': mir_score,
+            'Mismatch': mismatch,
+            'Fossil_Score': total,
+        })
+    
+    df = pd.DataFrame(rows)
+    return df.sort_values('Fossil_Score', ascending=False).reset_index(drop=True)
+
+
 def load_catalogs():
     """Loads and merges the physical properties and H-alpha catalogs."""
     try:
@@ -627,7 +1025,7 @@ def calculate_best_fit_maps(results_file_path, fits_file_path):
 
 from scipy.ndimage import gaussian_filter
 
-def plot_interactive_map(data, title, cmap='plasma', selected_point=None, key_id=None, blur_sigma=0, units=''):
+def plot_interactive_map(data, title, cmap='plasma', selected_point=None, key_id=None, blur_sigma=0):
     """
     Creates an interactive Plotly Heatmap with clickable pixels.
     Uses invisible scatter points overlay for reliable click detection.
@@ -657,16 +1055,13 @@ def plot_interactive_map(data, title, cmap='plasma', selected_point=None, key_id
     else:
         zmin, zmax = None, None
     
-    # Colorbar title with units
-    colorbar_title = units if units else ''
-    
     # 3. Heatmap (visual layer)
     fig.add_trace(go.Heatmap(
         z=data_plot, 
         colorscale=cmap, 
         showscale=True,
         zmin=zmin, zmax=zmax,
-        colorbar=dict(thickness=8, len=0.8, tickfont=dict(color='white', size=9), outlinewidth=0, title=dict(text=colorbar_title, font=dict(color='white', size=9))),
+        colorbar=dict(thickness=8, len=0.8, tickfont=dict(color='white', size=9), outlinewidth=0),
         hoverinfo='skip',  # Disable hover on heatmap
     ))
     
@@ -978,6 +1373,74 @@ else:
     st.sidebar.success(display_content, icon="⭐")
 
 # --- CLASSIFICATION LOGIC END ---
+
+# --- CATALOG LINKS BOX ---
+crossmatch_df = load_crossmatch_links()
+catalog_links = get_catalog_links_for_galaxy(
+    galaxy_name=selected_galaxy_name,
+    ra=ra_val,
+    dec=dec_val,
+    crossmatch_df=crossmatch_df,
+)
+
+if catalog_links:
+    # Build HTML for the catalog links box
+    matched_lines = []
+    unmatched_lines = []
+    
+    for survey, info in catalog_links.items():
+        icon = info['icon']
+        name = info['display_name']
+        url = info['url']
+        matched = info['matched']
+        
+        if matched and url:
+            matched_lines.append(
+                f'<a href="{url}" target="_blank" '
+                f'style="color:#58A6FF; text-decoration:none; display:block; '
+                f'padding:3px 0; font-size:0.9em;">'
+                f'{icon} {name} ↗</a>'
+            )
+        elif matched:
+            matched_lines.append(
+                f'<span style="color:#7EE787; display:block; padding:3px 0; '
+                f'font-size:0.9em;">{icon} {name} ✓</span>'
+            )
+        else:
+            unmatched_lines.append(name)
+    
+    n_matched = len(matched_lines)
+    n_total = len(catalog_links)
+    
+    html_content = (
+        f'<div style="background-color:#1a1a2e; border:1px solid #334155; '
+        f'border-radius:8px; padding:12px; margin:8px 0;">'
+        f'<div style="color:#E2E8F0; font-weight:600; font-size:0.95em; '
+        f'margin-bottom:8px; border-bottom:1px solid #334155; padding-bottom:6px;">'
+        f'📡 Catalog Crossmatch ({n_matched}/{n_total})</div>'
+    )
+    
+    html_content += ''.join(matched_lines)
+    
+    if unmatched_lines:
+        html_content += (
+            f'<div style="color:#6B7280; font-size:0.8em; margin-top:6px; '
+            f'padding-top:6px; border-top:1px solid #262630;">'
+            f'No match: {", ".join(unmatched_lines)}</div>'
+        )
+    
+    html_content += '</div>'
+    st.sidebar.markdown(html_content, unsafe_allow_html=True)
+else:
+    st.sidebar.markdown(
+        '<div style="background-color:#1a1a2e; border:1px solid #334155; '
+        'border-radius:8px; padding:12px; margin:8px 0; color:#6B7280; '
+        'font-size:0.9em;">'
+        '📡 No crossmatch data available.<br>'
+        '<span style="font-size:0.8em;">Run Crossmatch_generator.py first.</span>'
+        '</div>',
+        unsafe_allow_html=True
+    )
 
 
 selected_val = next((val for name, val in sorted_galaxy_data if name == display_options[selected_label]), None)
@@ -1297,26 +1760,16 @@ with col_main:
                     
                     P = np.broadcast_to(psf_profile, flux_cube_raw.shape)
                     safe_noise = np.where(noise_cube_raw <= 0, np.inf, noise_cube_raw)
-                    variance = safe_noise**2
-                    inv_var = 1.0 / variance
+                    inv_var = 1.0 / (safe_noise**2)
                     
-                    # Optimal extraction: flux = sum(P * F / var) / sum(P^2 / var)
                     num = np.nansum(flux_cube_raw * P * inv_var, axis=(1,2))
                     denom = np.nansum((P**2) * inv_var, axis=(1,2))
                     
                     with np.errstate(divide='ignore', invalid='ignore'):
                         spec_flux = np.divide(num, denom)
-                        # Noise for optimal extraction: sigma = 1 / sqrt(sum(P^2 / var))
-                        # But we need to scale it to match the flux units
-                        spec_noise = np.sqrt(np.divide(1.0, denom))
-                    
-                    # Replace inf/nan with reasonable values instead of zero
-                    spec_flux = np.nan_to_num(spec_flux, nan=0.0, posinf=0.0, neginf=0.0)
-                    # For noise, use median of valid noise values as fallback
-                    median_noise = np.nanmedian(spec_noise[np.isfinite(spec_noise) & (spec_noise > 0)])
-                    if not np.isfinite(median_noise) or median_noise <= 0:
-                        median_noise = np.nanmedian(np.abs(spec_flux)) * 0.1  # 10% of flux as fallback
-                    spec_noise = np.where(np.isfinite(spec_noise) & (spec_noise > 0), spec_noise, median_noise)
+                        spec_noise = np.divide(1.0, np.sqrt(denom))
+                    spec_flux = np.nan_to_num(spec_flux)
+                    spec_noise = np.nan_to_num(spec_noise)
                     
                 else:
                     # 2. STANDARD APERTURE MEAN
@@ -1342,28 +1795,21 @@ with col_main:
                 # 1. Flux Trace
                 if display_mode == "Flux":
                     y_data = spec_flux 
-                    
-                    # Add noise band FIRST (so it appears behind the flux line)
-                    # Check if noise is valid (not all zeros or ones)
-                    noise_valid = np.any(spec_noise > 0) and np.any(spec_noise != 1.0) and np.nanmax(spec_noise) > 1e-10
-                    if noise_valid:
-                        fig_spec.add_trace(go.Scatter(
-                            x=np.concatenate([wave_plot, wave_plot[::-1]]),
-                            y=np.concatenate([spec_flux + spec_noise, (spec_flux - spec_noise)[::-1]]),
-                            fill='toself', 
-                            fillcolor='rgba(100, 150, 200, 0.3)',  # More visible blue-gray
-                            line=dict(color='rgba(100, 150, 200, 0.5)', width=0.5),
-                            name='Noise (±1σ)',
-                            hoverinfo='skip'
-                        ))
-                    
-                    # Add flux line on top
                     fig_spec.add_trace(go.Scatter(
                         x=wave_plot, y=spec_flux, 
                         mode='lines', 
                         line=dict(color='#00CCFF', width=1.5), 
                         name='Flux',
                         hovertemplate='%{y:.2f} 10⁻¹⁷ W/m²/µm<extra></extra>'
+                    ))
+                    fig_spec.add_trace(go.Scatter(
+                        x=np.concatenate([wave_plot, wave_plot[::-1]]),
+                        y=np.concatenate([spec_flux + spec_noise, (spec_flux - spec_noise)[::-1]]),
+                        fill='toself', 
+                        fillcolor='rgba(128,128,128,0.2)', 
+                        line=dict(color='rgba(0,0,0,0)'),
+                        name='Noise (±1σ)',
+                        hoverinfo='skip'
                     ))
                 
                 # 2. SNR Trace
@@ -1532,22 +1978,6 @@ with col_main:
                         std_options["⭐ Best Flux"] = "COMP_FLUX"
                         std_options["⭐ Best Velocity"] = "COMP_VEL"
                         std_options["⭐ W80"] = "COMP_W80"
-                        
-                        # Units for map colorbars
-                        def get_map_units(label, key):
-                            """Get appropriate units for map colorbar."""
-                            if 'Flux' in label or key == 'COMP_FLUX' or key.startswith('A'):
-                                return '[erg/s/cm²]'
-                            elif 'Velocity' in label or key == 'COMP_VEL' or key.startswith('C'):
-                                return '[km/s]'
-                            elif 'W80' in label or key == 'COMP_W80':
-                                return '[km/s]'
-                            elif 'Sigma' in label or key.startswith('B'):
-                                return '[km/s]'
-                            elif 'CHI' in key.upper():
-                                return ''
-                            else:
-                                return ''
 
                         HA_REST, C_LIGHT = 0.65628, 299792.458
                         def get_d(k):
@@ -1586,7 +2016,7 @@ with col_main:
                         with m1:
                             l1 = st.selectbox("Map 1", list(std_options.keys()), index=list(std_options.keys()).index("⭐ Best Flux") if "⭐ Best Flux" in std_options else 0, key=f"s1_{selected_galaxy_name}")
                             d1 = get_d(std_options[l1])
-                            sel1 = plot_interactive_map(d1, l1, 'Plasma', (cx, cy), f"p1_{l1}", blur_sigma=sigma_val, units=get_map_units(l1, std_options[l1]))
+                            sel1 = plot_interactive_map(d1, l1, 'Plasma', (cx, cy), f"p1_{l1}", blur_sigma=sigma_val)
 
                         with m2:
                             l2 = st.selectbox("Map 2", list(std_options.keys()), index=list(std_options.keys()).index("⭐ W80") if "⭐ W80" in std_options else 0, key=f"s2_{selected_galaxy_name}")
@@ -1611,7 +2041,7 @@ with col_main:
                                 # 2. Heatmap (visual)
                                 fig_w80.add_trace(go.Heatmap(
                                     z=d2, colorscale='Oranges', zmin=zmin, zmax=zmax, showscale=True,
-                                    colorbar=dict(thickness=8, len=0.8, tickfont=dict(color='white', size=9), outlinewidth=0, title=dict(text='[km/s]', font=dict(color='white', size=9))),
+                                    colorbar=dict(thickness=8, len=0.8, tickfont=dict(color='white', size=9), outlinewidth=0),
                                     hoverinfo='skip'
                                 ))
                                 
@@ -1687,14 +2117,14 @@ with col_main:
                                     config={'displayModeBar': False}, on_select="rerun", 
                                     selection_mode="points", key=w80_map_key)
                             else:
-                                sel2 = plot_interactive_map(d2, l2, 'Plasma', (cx, cy), f"p2_{l2}", blur_sigma=sigma_val, units=get_map_units(l2, std_options[l2]))
+                                sel2 = plot_interactive_map(d2, l2, 'Plasma', (cx, cy), f"p2_{l2}", blur_sigma=sigma_val)
 
                         with m3:
                             l3 = st.selectbox("Map 3", list(std_options.keys()), index=list(std_options.keys()).index("⭐ Best Velocity") if "⭐ Best Velocity" in std_options else 0, key=f"s3_{selected_galaxy_name}")
                             k3 = std_options[l3]
                             d3 = get_d(k3)
                             cm3 = 'Spectral_r' if any(x in l3.upper() for x in ['VELOCITY', 'VEL', 'C']) else 'Plasma'
-                            sel3 = plot_interactive_map(d3, l3, cm3, (cx, cy), f"p3_{l3}", blur_sigma=sigma_val, units=get_map_units(l3, k3))
+                            sel3 = plot_interactive_map(d3, l3, cm3, (cx, cy), f"p3_{l3}", blur_sigma=sigma_val)
 
                         # --- COORDINATE INPUTS - These are the source of truth ---
                         c_in1, c_in2 = st.columns(2)
@@ -1808,7 +2238,7 @@ with col_main:
                             y_min = np.nanmin(raw_spec[ha_window]) - (local_peak * 0.1) if np.any(ha_window) else -0.1
 
                             # 6. Plotting with SHARED X-AXIS
-                            st.markdown(f"**Best Model:** <span style='color:{b_color};'>{best_label}</span> | $\chi^2_1$: `{chi1:.2f}` | $\chi^2_2$: `{chi2:.2f}`", unsafe_allow_html=True)
+                            st.markdown(f"**Best Model:** <span style='color:{b_color};'>{best_label}</span> | $\\chi^2_1$: `{chi1:.2f}` | $\\chi^2_2$: `{chi2:.2f}`", unsafe_allow_html=True)
                             
                             # Create subplots with shared x-axis (spectrum on top, residuals below)
                             fig_combined = make_subplots(
@@ -1819,15 +2249,13 @@ with col_main:
                             )
                             
                             # --- TOP SUBPLOT: Spectrum ---
-                            # Noise Shading (added first so it's behind data)
+                            # Noise Shading
                             mask = np.isfinite(raw_spec) & np.isfinite(raw_noise)
-                            noise_valid = np.any(raw_noise[mask] > 0) and np.nanmax(raw_noise[mask]) > 1e-10
-                            if noise_valid:
-                                fig_combined.add_trace(go.Scatter(
-                                    x=np.concatenate([wave_rest[mask], wave_rest[mask][::-1]]),
-                                    y=np.concatenate([(raw_spec + raw_noise)[mask], (raw_spec - raw_noise)[mask][::-1]]),
-                                    fill='toself', fillcolor='rgba(100, 150, 200, 0.3)', line=dict(color='rgba(100, 150, 200, 0.5)', width=0.5), name='Noise (±1σ)', hoverinfo='skip'
-                                ), row=1, col=1)
+                            fig_combined.add_trace(go.Scatter(
+                                x=np.concatenate([wave_rest[mask], wave_rest[mask][::-1]]),
+                                y=np.concatenate([(raw_spec + raw_noise)[mask], (raw_spec - raw_noise)[mask][::-1]]),
+                                fill='toself', fillcolor='rgba(128, 128, 128, 0.2)', line=dict(color='rgba(0,0,0,0)'), name='Noise (±1σ)', hoverinfo='skip'
+                            ), row=1, col=1)
 
                             # Data and Main Fit Lines (Always visible)
                             fig_combined.add_trace(go.Scatter(x=wave_rest, y=raw_spec, mode='lines', line=dict(color='white', width=1.5), name='Data'), row=1, col=1)
@@ -1882,186 +2310,581 @@ with col_main:
     elif view_mode == "📈 Correlations":
         st.subheader("Interactive Galaxy Properties")
         
-        df_catalog = load_catalogs()
+        # Sub-navigation for correlation views
+        corr_view = st.radio(
+            "Correlation View",
+            ["🔬 Properties", "🌡️ WISE Diagnostics", "🦴 Fossil Candidates"],
+            horizontal=True,
+            label_visibility="collapsed",
+            key="corr_sub_view"
+        )
         
-        if df_catalog is not None:
-            # Fix negative redshift values (set to 0)
-            if 'Redshift' in df_catalog.columns:
-                df_catalog.loc[df_catalog['Redshift'] < 0, 'Redshift'] = 0
+        # =====================================================================
+        # SUB-VIEW 1: Galaxy Properties (existing scatter plot)
+        # =====================================================================
+        if corr_view == "🔬 Properties":
+            df_catalog = load_catalogs()
             
-            # 1. Define Base Columns (Raw Data)
-            # We map friendly names to the actual column names in the dataframe
-            # Note: 'LMSTAR' is already Log10(Mass), so we label it as such to avoid confusion.
-            base_cols = {
-                'Stellar Mass (LMSTAR)': 'LMSTAR',  # Already Log
-                'SFR': 'SFR',                       # Linear
-                'Redshift': 'Redshift',             # Linear
-                'Velocity Disp. (σ)': 'SIG',        # Linear
-                'Hα Flux': 'FLUX_HA',              # Linear
-                'V-Band (Rest)': 'RF_V',
-                'Dust (Av)': 'SED_AV'
-            }
-            
-            # Units for each quantity
-            units = {
-                'Stellar Mass (LMSTAR)': '[log(M☉)]',
-                'SFR': '[M☉/yr]',
-                'Redshift': '',
-                'Velocity Disp. (σ)': '[km/s]',
-                'Hα Flux': '[erg/s/cm²]',
-                'V-Band (Rest)': '[mag]',
-                'Dust (Av)': '[mag]'
-            }
-            
-            # 2. Controls (Selectbox + Log Button)
-            c_ctrl1, c_ctrl2, c_ctrl3 = st.columns(3)
-            
-            # --- X-AXIS ---
-            with c_ctrl1:
-                x_axis_label = st.selectbox("X-Axis", list(base_cols.keys()), index=0, key='qp_x')
-                x_log = st.checkbox("Log X", value=False, key='qp_x_log')
+            if df_catalog is not None:
+                # Fix negative redshift values (set to 0)
+                if 'Redshift' in df_catalog.columns:
+                    df_catalog.loc[df_catalog['Redshift'] < 0, 'Redshift'] = 0
                 
-            # --- Y-AXIS ---
-            with c_ctrl2:
-                y_axis_label = st.selectbox("Y-Axis", list(base_cols.keys()), index=1, key='qp_y')
-                y_log = st.checkbox("Log Y", value=True, key='qp_y_log') # Default to Log for SFR
+                base_cols = {
+                    'Stellar Mass (LMSTAR)': 'LMSTAR',
+                    'SFR': 'SFR',
+                    'Redshift': 'Redshift',
+                    'Velocity Disp. (σ)': 'SIG',
+                    'Hα Flux': 'FLUX_HA',
+                    'V-Band (Rest)': 'RF_V',
+                    'Dust (Av)': 'SED_AV'
+                }
                 
-            # --- COLOR ---
-            with c_ctrl3:
-                c_axis_label = st.selectbox("Color Scale", list(base_cols.keys()), index=2, key='qp_c')
-                c_log = st.checkbox("Log Color", value=False, key='qp_c_log')
+                c_ctrl1, c_ctrl2, c_ctrl3 = st.columns(3)
+                with c_ctrl1:
+                    x_axis_label = st.selectbox("X-Axis", list(base_cols.keys()), index=0, key='qp_x')
+                    x_log = st.checkbox("Log X", value=False, key='qp_x_log')
+                with c_ctrl2:
+                    y_axis_label = st.selectbox("Y-Axis", list(base_cols.keys()), index=1, key='qp_y')
+                    y_log = st.checkbox("Log Y", value=True, key='qp_y_log')
+                with c_ctrl3:
+                    c_axis_label = st.selectbox("Color Scale", list(base_cols.keys()), index=2, key='qp_c')
+                    c_log = st.checkbox("Log Color", value=False, key='qp_c_log')
 
-            # 3. Prepare Data
-            x_col = base_cols[x_axis_label]
-            y_col = base_cols[y_axis_label]
-            c_col = base_cols[c_axis_label]
-            
-            # Filter NaNs
-            plot_df = df_catalog.dropna(subset=[x_col, y_col]).copy()
-            
-            # --- APPLY LOG LOGIC (Corrected) ---
-            def get_data_and_label(df, col, label, is_log, unit=''):
-                data = df[col]
-                final_label = label
+                x_col = base_cols[x_axis_label]
+                y_col = base_cols[y_axis_label]
+                c_col = base_cols[c_axis_label]
                 
-                if is_log:
-                    # 1. Perform math (returns numpy array)
-                    # We use np.where to handle zeros/negatives safely
-                    vals = np.where(data > 0, data, np.nan)
-                    vals = np.log10(vals)
-                    
-                    # 2. Convert back to Pandas Series with ORIGINAL INDEX
-                    # This ensures .loc[idx] works later
-                    data = pd.Series(vals, index=df.index)
-                    
-                    # Update label with log and adjust units
-                    if unit:
-                        # For log scale, units become log of original
-                        if '[log(' in unit:
-                            final_label = f"Log({label}) {unit}"
-                        else:
-                            final_label = f"Log({label}) [log{unit[:-1]}]" if unit.endswith(']') else f"Log({label})"
-                    else:
+                plot_df = df_catalog.dropna(subset=[x_col, y_col]).copy()
+                
+                def get_data_and_label(df, col, label, is_log):
+                    data = df[col]
+                    final_label = label
+                    if is_log:
+                        vals = np.where(data > 0, data, np.nan)
+                        vals = np.log10(vals)
+                        data = pd.Series(vals, index=df.index)
                         final_label = f"Log({label})"
-                else:
-                    # Add unit to label
-                    if unit:
-                        final_label = f"{label} {unit}"
+                    return data, final_label
+
+                x_data, x_title = get_data_and_label(plot_df, x_col, x_axis_label, x_log)
+                y_data, y_title = get_data_and_label(plot_df, y_col, y_axis_label, y_log)
+                c_data, c_title = get_data_and_label(plot_df, c_col, c_axis_label, c_log)
+                
+                clean_id = selected_galaxy_name.strip()
+                current_gal_idx = plot_df[plot_df['ID'] == clean_id].index
+                if len(current_gal_idx) == 0 and 'FILE' in plot_df.columns:
+                     current_gal_idx = plot_df[plot_df['FILE'].astype(str).str.contains(clean_id, regex=False, na=False)].index
+
+                fig_main = go.Figure()
+                fig_main.add_trace(go.Scatter(
+                    x=x_data, y=y_data,
+                    mode='markers',
+                    marker=dict(size=8, color=c_data, colorscale='Viridis', showscale=True, opacity=0.7,
+                                colorbar=dict(title=c_title)),
+                    text=plot_df['ID'],
+                    customdata=plot_df['ID'],
+                    name='Galaxies',
+                    hovertemplate='<b>%{text}</b><br>' + x_title + ': %{x:.3f}<br>' + y_title + ': %{y:.3f}<extra></extra>'
+                ))
+                
+                if len(current_gal_idx) > 0:
+                    idx = current_gal_idx[0]
+                    gx = x_data.loc[idx]
+                    gy = y_data.loc[idx]
+                    if np.isfinite(gx) and np.isfinite(gy):
+                        fig_main.add_trace(go.Scatter(
+                            x=[gx], y=[gy], mode='markers',
+                            marker=dict(size=25, color='rgba(0,0,0,0)', line=dict(color='#FF00FF', width=3)),
+                            name='Selected', hoverinfo='skip'
+                        ))
+                        fig_main.add_trace(go.Scatter(
+                            x=[gx], y=[gy], mode='markers',
+                            marker=dict(size=10, color='#FF00FF', symbol='cross'),
+                            showlegend=False, hoverinfo='skip'
+                        ))
+
+                fig_main.update_layout(
+                    height=600, template="plotly_dark",
+                    margin=dict(l=80, r=20, t=40, b=60),
+                    xaxis_title=x_title, yaxis_title=y_title,
+                    hovermode='closest', dragmode=False,
+                    legend=dict(orientation="v", y=0.98, x=0.02, xanchor='left', yanchor='middle',
+                                font=dict(color='#F1F5F9')),
+                    uirevision="corr_plot_interactive",
+                )
+                
+                event = st.plotly_chart(
+                    fig_main, width='stretch',
+                    config={'displayModeBar': False},
+                    on_select="rerun", selection_mode="points",
+                    key="corr_plot_interactive"
+                )
+                
+                if event and "selection" in event:
+                    pts = event.get("selection", {}).get("points", [])
+                    if pts:
+                        clicked_id = pts[0].get("customdata")
+                        if clicked_id and clicked_id != selected_galaxy_name:
+                            for label, galaxy_name in display_options.items():
+                                if galaxy_name == clicked_id:
+                                    st.session_state.current_selection = label
+                                    st.rerun()
+                                    break
+
+        # =====================================================================
+        # SUB-VIEW 2: WISE Color-Color Diagnostics
+        # =====================================================================
+        elif corr_view == "🌡️ WISE Diagnostics":
+            xmatch_full = load_crossmatch_full()
+            
+            if xmatch_full is not None:
+                # Find WISE magnitude columns
+                w1_col = next((c for c in xmatch_full.columns if 'W1mag' in c), None)
+                w2_col = next((c for c in xmatch_full.columns if 'W2mag' in c), None)
+                w3_col = next((c for c in xmatch_full.columns if 'W3mag' in c), None)
+                w4_col = next((c for c in xmatch_full.columns if 'W4mag' in c), None)
+                
+                if w1_col and w2_col and w3_col:
+                    # Compute colors
+                    wise_df = xmatch_full[['OBJECT', 'RA', 'DEC']].copy()
+                    wise_df['W1_W2'] = pd.to_numeric(xmatch_full[w1_col], errors='coerce') - \
+                                       pd.to_numeric(xmatch_full[w2_col], errors='coerce')
+                    wise_df['W2_W3'] = pd.to_numeric(xmatch_full[w2_col], errors='coerce') - \
+                                       pd.to_numeric(xmatch_full[w3_col], errors='coerce')
+                    if w4_col:
+                        wise_df['W3_W4'] = pd.to_numeric(xmatch_full[w3_col], errors='coerce') - \
+                                           pd.to_numeric(xmatch_full[w4_col], errors='coerce')
+                    
+                    # Add W80 data for color coding
+                    w80_map = {item[0]: item[1] for item in sorted_galaxy_data
+                               if isinstance(item, (list, tuple)) and len(item) >= 2}
+                    wise_df['W80'] = wise_df['OBJECT'].map(w80_map)
+                    
+                    # Filter to valid data
+                    plot_wise = wise_df.dropna(subset=['W1_W2', 'W2_W3']).copy()
+                    
+                    if len(plot_wise) > 0:
+                        # --- Controls ---
+                        cw1, cw2 = st.columns([2, 1])
+                        with cw1:
+                            wise_color_by = st.selectbox(
+                                "Color by", ["W80 (km/s)", "W1−W2", "None"],
+                                key="wise_color_sel"
+                            )
+                        with cw2:
+                            show_wedge = st.checkbox("Show AGN wedges", value=True, key="wise_wedge")
+                        
+                        # Color data
+                        if wise_color_by == "W80 (km/s)" and 'W80' in plot_wise.columns:
+                            color_data = plot_wise['W80']
+                            cbar_title = "W80 (km/s)"
+                            colorscale = 'Hot'
+                        elif wise_color_by == "W1−W2":
+                            color_data = plot_wise['W1_W2']
+                            cbar_title = "W1−W2"
+                            colorscale = 'RdYlBu_r'
+                        else:
+                            color_data = None
+                            cbar_title = None
+                            colorscale = None
+                        
+                        # --- Build WISE figure ---
+                        fig_wise = go.Figure()
+                        
+                        # AGN demarcation regions (drawn first so they're behind)
+                        if show_wedge:
+                            # Stern+2012: W1-W2 >= 0.8 horizontal line
+                            fig_wise.add_hline(
+                                y=0.8, line_dash="dash", line_color="#FF4B4B",
+                                line_width=2, opacity=0.8,
+                                annotation_text="Stern+12 (W1−W2=0.8)",
+                                annotation_position="top left",
+                                annotation_font=dict(color="#FF4B4B", size=11)
+                            )
+                            
+                            # Mateos+2012 AGN wedge (approximate parametric boundaries)
+                            # Upper boundary
+                            w2w3_wedge = np.linspace(1.5, 5.5, 50)
+                            upper_w1w2 = 0.315 * w2w3_wedge - 0.222
+                            lower_w1w2 = 0.315 * w2w3_wedge - 0.796
+                            
+                            # Vertical left boundary at W2-W3 ~ 2.0
+                            fig_wise.add_trace(go.Scatter(
+                                x=np.concatenate([w2w3_wedge, w2w3_wedge[::-1]]),
+                                y=np.concatenate([upper_w1w2, lower_w1w2[::-1]]),
+                                fill='toself',
+                                fillcolor='rgba(255,75,75,0.08)',
+                                line=dict(color='rgba(255,75,75,0.4)', width=1, dash='dot'),
+                                name='Mateos+12 Wedge',
+                                hoverinfo='skip'
+                            ))
+                        
+                        # Main scatter
+                        marker_dict = dict(
+                            size=9,
+                            opacity=0.8,
+                            line=dict(width=0.5, color='rgba(255,255,255,0.3)')
+                        )
+                        if color_data is not None:
+                            marker_dict['color'] = color_data
+                            marker_dict['colorscale'] = colorscale
+                            marker_dict['showscale'] = True
+                            marker_dict['colorbar'] = dict(title=cbar_title, thickness=15)
+                        else:
+                            marker_dict['color'] = '#00CCFF'
+                        
+                        fig_wise.add_trace(go.Scatter(
+                            x=plot_wise['W2_W3'], y=plot_wise['W1_W2'],
+                            mode='markers',
+                            marker=marker_dict,
+                            text=plot_wise['OBJECT'],
+                            customdata=plot_wise['OBJECT'],
+                            name='KMOS3D',
+                            hovertemplate=(
+                                '<b>%{text}</b><br>'
+                                'W2−W3: %{x:.2f}<br>'
+                                'W1−W2: %{y:.2f}<br>'
+                                '<extra></extra>'
+                            )
+                        ))
+                        
+                        # Highlight selected galaxy
+                        cur_wise = plot_wise[plot_wise['OBJECT'] == selected_galaxy_name]
+                        if not cur_wise.empty:
+                            cx = cur_wise.iloc[0]['W2_W3']
+                            cy = cur_wise.iloc[0]['W1_W2']
+                            if np.isfinite(cx) and np.isfinite(cy):
+                                fig_wise.add_trace(go.Scatter(
+                                    x=[cx], y=[cy], mode='markers',
+                                    marker=dict(size=22, color='rgba(0,0,0,0)',
+                                                line=dict(color='#FF00FF', width=3)),
+                                    name='Selected', hoverinfo='skip'
+                                ))
+                                fig_wise.add_trace(go.Scatter(
+                                    x=[cx], y=[cy], mode='markers',
+                                    marker=dict(size=8, color='#FF00FF', symbol='cross'),
+                                    showlegend=False, hoverinfo='skip'
+                                ))
+                        
+                        fig_wise.update_layout(
+                            height=600, template="plotly_dark",
+                            margin=dict(l=80, r=20, t=40, b=60),
+                            xaxis_title="W2 − W3 (Vega mag)",
+                            yaxis_title="W1 − W2 (Vega mag)",
+                            hovermode='closest', dragmode=False,
+                            legend=dict(orientation="h", y=1.02, x=0.5, xanchor='center',
+                                        font=dict(color='#F1F5F9', size=11)),
+                            xaxis=dict(range=[-0.5, 6.5]),
+                            yaxis=dict(range=[-0.5, 2.5]),
+                        )
+                        
+                        # Click to select galaxy
+                        wise_event = st.plotly_chart(
+                            fig_wise, width='stretch',
+                            config={'displayModeBar': False},
+                            on_select="rerun", selection_mode="points",
+                            key="wise_plot_interactive"
+                        )
+                        
+                        if wise_event and "selection" in wise_event:
+                            pts = wise_event.get("selection", {}).get("points", [])
+                            if pts:
+                                clicked_id = pts[0].get("customdata")
+                                if clicked_id and clicked_id != selected_galaxy_name:
+                                    for label, galaxy_name in display_options.items():
+                                        if galaxy_name == clicked_id:
+                                            st.session_state.current_selection = label
+                                            st.rerun()
+                                            break
+                        
+                        # --- Statistics summary ---
+                        n_total = len(plot_wise)
+                        n_stern = int((plot_wise['W1_W2'] >= 0.8).sum())
+                        
+                        # Check Mateos wedge membership
+                        in_mateos = (
+                            (plot_wise['W1_W2'] >= 0.315 * plot_wise['W2_W3'] - 0.796) &
+                            (plot_wise['W1_W2'] <= 0.315 * plot_wise['W2_W3'] - 0.222) &
+                            (plot_wise['W2_W3'] >= 1.5)
+                        )
+                        n_mateos = int(in_mateos.sum())
+                        
+                        if n_total > 0:
+                            st.markdown(
+                                f"**{n_total}** galaxies with WISE colors · "
+                                f"**{n_stern}** ({100*n_stern/n_total:.0f}%) above Stern+12 · "
+                                f"**{n_mateos}** ({100*n_mateos/n_total:.0f}%) in Mateos+12 wedge"
+                            )
+                        
+                        # Highlight fossil candidates in text
+                        if 'W80' in plot_wise.columns:
+                            # Exclude literature AGN from fossil count
+                            agn_ids_wise = load_agn_catalog_ids("AGN_SAMPLE.fits")
+                            is_lit = plot_wise['OBJECT'].apply(
+                                lambda g: is_agn_galaxy(g, agn_ids_wise))
+                            fossil_mask = (
+                                (plot_wise['W1_W2'] < 0.8) &
+                                (plot_wise['W80'] >= 400) &
+                                (~is_lit)
+                            )
+                            n_fossil = int(fossil_mask.sum())
+                            if n_fossil > 0:
+                                st.info(
+                                    f"🦴 **{n_fossil} potential fossil outflow candidates**: "
+                                    f"W80 ≥ 400 km/s but W1−W2 < 0.8 (below AGN threshold), "
+                                    f"excluding literature AGN"
+                                )
                     else:
-                        final_label = label
-                
-                return data, final_label
+                        st.warning("No valid WISE color data found in crossmatch.")
+                else:
+                    st.warning("WISE magnitude columns not found in crossmatch file.")
+            else:
+                st.info(
+                    "No crossmatch data available. Run `Crossmatch_generator.py` first to "
+                    "generate `crossmatch.fits`."
+                )
 
-            x_data, x_title = get_data_and_label(plot_df, x_col, x_axis_label, x_log, units.get(x_axis_label, ''))
-            y_data, y_title = get_data_and_label(plot_df, y_col, y_axis_label, y_log, units.get(y_axis_label, ''))
-            c_data, c_title = get_data_and_label(plot_df, c_col, c_axis_label, c_log, units.get(c_axis_label, ''))
+        # =====================================================================
+        # SUB-VIEW 3: Fossil AGN Candidate Scoring
+        # =====================================================================
+        elif corr_view == "🦴 Fossil Candidates":
+            st.markdown(
+                "Galaxies scored by likelihood of hosting **fossil AGN outflows** — "
+                "kinematic disturbance without current AGN activity."
+            )
             
-            # 4. Find Galaxy
-            clean_id = selected_galaxy_name.strip()
-            current_gal_idx = plot_df[plot_df['ID'] == clean_id].index
-            if len(current_gal_idx) == 0 and 'FILE' in plot_df.columns:
-                 current_gal_idx = plot_df[plot_df['FILE'].astype(str).str.contains(clean_id, regex=False, na=False)].index
-
-            # 5. Build Main Plot
-            fig_main = go.Figure()
+            # Load required data
+            xmatch_full = load_crossmatch_full()
+            agn_ids_fossil = load_agn_catalog_ids("AGN_SAMPLE.fits")
+            galaxy_list = [item[0] if isinstance(item, (list, tuple)) else item
+                           for item in sorted_galaxy_data]
             
-            # Scatter Layer (The clickable points)
-            fig_main.add_trace(go.Scatter(
-                x=x_data, y=y_data,
-                mode='markers',
-                marker=dict(
-                    size=8, 
-                    color=c_data, 
-                    colorscale='Viridis', 
-                    showscale=True, 
-                    opacity=0.7,
-                    colorbar=dict(title=c_title)
-                ),
-                text=plot_df['ID'], 
-                customdata=plot_df['ID'], # <--- IMPORTANT: Store ID for the click event
-                name='Galaxies',
-                hovertemplate='<b>%{text}</b><br>' + x_title + ': %{x:.3f}<br>' + y_title + ': %{y:.3f}<extra></extra>'
-            ))
+            fossil_df = compute_fossil_scores(
+                galaxy_list=galaxy_list,
+                sorted_galaxy_data=sorted_galaxy_data,
+                crossmatch_df=xmatch_full,
+                agn_ids=agn_ids_fossil,
+                results_path=RESULTS_PATH,
+            )
             
-            # Highlight Selected Galaxy (The Ring)
-            if len(current_gal_idx) > 0:
-                idx = current_gal_idx[0]
-                gx = x_data.loc[idx]
-                gy = y_data.loc[idx]
+            if fossil_df is not None and len(fossil_df) > 0:
                 
-                if np.isfinite(gx) and np.isfinite(gy):
-                    fig_main.add_trace(go.Scatter(
-                        x=[gx], y=[gy], mode='markers',
-                        marker=dict(size=25, color='rgba(0,0,0,0)', line=dict(color='#FF00FF', width=3)),
+                # Separate lit AGN from scorable galaxies early
+                fossil_non_agn = fossil_df[fossil_df['Lit_AGN'] == False].reset_index(drop=True)
+                n_excluded = int(fossil_df['Lit_AGN'].sum())
+                n_candidates = len(fossil_non_agn)
+                
+                # --- Top: Score distribution plot (non-AGN only) ---
+                col_chart, col_legend = st.columns([3, 1])
+                
+                with col_chart:
+                    # Color each bar by score tier
+                    def score_color(s):
+                        if s >= 6: return '#FF4B4B'   # strong fossil
+                        if s >= 4: return '#FF8C00'   # likely fossil
+                        if s >= 3: return '#FFD700'   # possible (threshold)
+                        return '#4A5568'               # unlikely
+                    
+                    bar_colors = fossil_non_agn['Fossil_Score'].apply(score_color)
+                    
+                    fig_dist = go.Figure()
+                    fig_dist.add_trace(go.Bar(
+                        x=fossil_non_agn['ID'], y=fossil_non_agn['Fossil_Score'],
+                        marker_color=bar_colors,
+                        text=fossil_non_agn['Fossil_Score'],
+                        textposition='outside',
+                        textfont=dict(size=8, color='gray'),
+                        hovertemplate=(
+                            '<b>%{x}</b><br>'
+                            'Fossil Score: %{y}/8<br>'
+                            '<extra></extra>'
+                        ),
+                    ))
+                    
+                    # Highlight selected galaxy
+                    sel_row = fossil_non_agn[fossil_non_agn['ID'] == selected_galaxy_name]
+                    if not sel_row.empty:
+                        fig_dist.add_annotation(
+                            x=selected_galaxy_name,
+                            y=sel_row.iloc[0]['Fossil_Score'] + 0.5,
+                            text="▼", showarrow=False,
+                            font=dict(color='#FF00FF', size=16)
+                        )
+                    
+                    fig_dist.update_layout(
+                        height=280, template="plotly_dark",
+                        margin=dict(l=40, r=10, t=10, b=80),
+                        xaxis=dict(tickangle=-45, tickfont=dict(size=7), title=None),
+                        yaxis=dict(title="Fossil Score", range=[0, 9],
+                                   dtick=1, gridcolor='#334155'),
+                        bargap=0.15, showlegend=False,
+                    )
+                    st.plotly_chart(fig_dist, use_container_width=True,
+                                   config={'displayModeBar': False})
+                    
+                    if n_excluded > 0:
+                        st.caption(f"⛔ {n_excluded} literature AGN excluded from chart")
+                
+                with col_legend:
+                    st.markdown("""
+                    **Score Legend**
+                    
+                    <span style='color:#FF4B4B'>■</span> **6–8** Strong fossil  
+                    <span style='color:#FF8C00'>■</span> **4–5** Likely fossil  
+                    <span style='color:#FFD700'>■</span> **3** Possible  
+                    <span style='color:#4A5568'>■</span> **0–2** Unlikely
+                    
+                    ---
+                    **Scoring (0–8):**
+                    
+                    ⛔ *Lit. AGN → 0*  
+                    Milliquas OR SIMBAD
+                    
+                    *Kinematics (0–3)*  
+                    W80 strength
+                    
+                    *WHAN (0–1)*  
+                    Not sAGN/wAGN
+                    
+                    *MIR Fading (0–2)*  
+                    W1−W2 below AGN
+                    
+                    *Mismatch (0–2)*  
+                    High W80 + faded MIR
+                    """, unsafe_allow_html=True)
+                
+                # --- Scatter: W80 vs Fossil Score ---
+                st.markdown("---")
+                fig_scatter = go.Figure()
+                
+                # Literature AGN are hard-excluded (score = 0)
+                lit_agn = fossil_df[fossil_df['Lit_AGN'] == True]
+                non_agn = fossil_df[fossil_df['Lit_AGN'] == False]
+                
+                # Non-AGN galaxies (fossil candidates live here)
+                fig_scatter.add_trace(go.Scatter(
+                    x=non_agn['W80'], y=non_agn['Fossil_Score'],
+                    mode='markers',
+                    marker=dict(size=9, color='#00CCFF', opacity=0.8,
+                                line=dict(width=0.5, color='white')),
+                    text=non_agn['ID'], name='No lit. AGN',
+                    hovertemplate='<b>%{text}</b><br>W80: %{x:.0f} km/s<br>Score: %{y}/8<extra></extra>'
+                ))
+                # Literature AGN (excluded, shown as X markers at score 0)
+                fig_scatter.add_trace(go.Scatter(
+                    x=lit_agn['W80'], y=lit_agn['Fossil_Score'],
+                    mode='markers',
+                    marker=dict(size=9, color='#FF4B4B', symbol='x', opacity=0.5,
+                                line=dict(width=1.5, color='#FF4B4B')),
+                    text=lit_agn['ID'], name='Lit. AGN (excluded)',
+                    hovertemplate='<b>%{text}</b><br>W80: %{x:.0f} km/s<br>⛔ Literature AGN<extra></extra>'
+                ))
+                
+                # Highlight selected
+                sel_fossil = fossil_df[fossil_df['ID'] == selected_galaxy_name]
+                if not sel_fossil.empty:
+                    sx = sel_fossil.iloc[0]['W80']
+                    sy = sel_fossil.iloc[0]['Fossil_Score']
+                    fig_scatter.add_trace(go.Scatter(
+                        x=[sx], y=[sy], mode='markers',
+                        marker=dict(size=22, color='rgba(0,0,0,0)',
+                                    line=dict(color='#FF00FF', width=3)),
                         name='Selected', hoverinfo='skip'
                     ))
-                    fig_main.add_trace(go.Scatter(
-                        x=[gx], y=[gy], mode='markers',
-                        marker=dict(size=10, color='#FF00FF', symbol='cross'),
-                        showlegend=False, hoverinfo='skip'
-                    ))
-
-            fig_main.update_layout(
-                height=600, 
-                template="plotly_dark",
-                margin=dict(l=80, r=20, t=40, b=60),
-                xaxis_title=x_title, 
-                yaxis_title=y_title,
-                hovermode='closest',
-                dragmode=False,  # Disable drag for clean click selection
-                legend=dict(
-                    orientation="v",
-                    y=0.98,
-                    x=0.02,
-                    xanchor='left',
-                    yanchor='middle',
-                    font=dict(color='#F1F5F9')
-                ),
-                uirevision="corr_plot_interactive",  # Preserve zoom/pan state
-            )
-            
-            # --- RENDER WITH SELECTION EVENT ---
-            event = st.plotly_chart(
-                fig_main, 
-                width='stretch',
-                config={'displayModeBar': False},
-                on_select="rerun",          
-                selection_mode="points",
-                key="corr_plot_interactive"
-            )
-            
-            # --- HANDLE GALAXY SELECTION FROM CLICK ---
-            if event and "selection" in event:
-                pts = event.get("selection", {}).get("points", [])
-                if pts:
-                    clicked_id = pts[0].get("customdata")
-                    if clicked_id and clicked_id != selected_galaxy_name:
-                        # Find matching label and switch galaxy
-                        for label, galaxy_name in display_options.items():
-                            if galaxy_name == clicked_id:
-                                st.session_state.current_selection = label
-                                st.rerun()
-                                break
+                
+                # Fossil zone annotation
+                w80_max = fossil_df['W80'].max()
+                if not np.isfinite(w80_max) or w80_max < 200:
+                    w80_max = 800  # fallback
+                fig_scatter.add_shape(
+                    type="rect", x0=200, x1=w80_max * 1.05,
+                    y0=3, y1=8.5,
+                    fillcolor="rgba(255,75,75,0.06)", line=dict(color="rgba(255,75,75,0.3)", dash="dot"),
+                )
+                w80_median = fossil_df['W80'].median()
+                if not np.isfinite(w80_median):
+                    w80_median = 400
+                fig_scatter.add_annotation(
+                    x=max(400, w80_median),
+                    y=8.2, text="🦴 Fossil Zone (≥3/8)",
+                    showarrow=False, font=dict(color='#FF8C00', size=12)
+                )
+                
+                fig_scatter.update_layout(
+                    height=450, template="plotly_dark",
+                    margin=dict(l=60, r=20, t=30, b=60),
+                    xaxis_title="Mean W80 (km/s)",
+                    yaxis_title="Fossil Score (0–8)",
+                    yaxis=dict(range=[-0.5, 9], dtick=1, gridcolor='#334155'),
+                    hovermode='closest', dragmode=False,
+                    legend=dict(orientation="h", y=1.05, x=0.5, xanchor='center',
+                                font=dict(color='#F1F5F9', size=11)),
+                )
+                
+                st.plotly_chart(fig_scatter, use_container_width=True,
+                               config={'displayModeBar': False})
+                
+                # --- Detailed table for top candidates ---
+                st.markdown(f"#### Top Fossil Candidates  \n"
+                            f"*{n_candidates} scored · {n_excluded} literature AGN excluded*")
+                
+                if n_candidates > 0:
+                    slider_max = min(30, n_candidates)
+                    slider_min = min(5, slider_max)
+                    top_n = st.slider("Show top N", slider_min, slider_max,
+                                      min(10, slider_max), key="fossil_top_n")
+                    
+                    top_df = fossil_non_agn.head(top_n).copy()
+                    
+                    # Format for display
+                    display_cols = ['ID', 'Fossil_Score', 'W80', 'W1_W2',
+                                    'Kin_Score', 'WHAN_Score', 'MIR_Score',
+                                    'Mismatch', 'DeepRadio', 'DeepXray']
+                    display_df = top_df[display_cols].copy()
+                    display_df.columns = ['Galaxy', 'Score', 'W80', 'W1−W2',
+                                          'Kin', 'WHAN', 'MIR', 'Mismatch', 'Radio', 'X-ray']
+                    
+                    # Style: highlight the selected galaxy row
+                    def highlight_selected(row):
+                        if row['Galaxy'] == selected_galaxy_name:
+                            return ['background-color: #2d1b4e'] * len(row)
+                        return [''] * len(row)
+                    
+                    styled = display_df.style.apply(highlight_selected, axis=1).format({
+                        'W80': '{:.0f}',
+                        'W1−W2': '{:.3f}',
+                        'Score': '{:.0f}',
+                    })
+                    
+                    st.dataframe(styled, use_container_width=True, hide_index=True, height=400)
+                
+                # Selected galaxy breakdown (shown for all, including excluded AGN)
+                sel_fossil = fossil_df[fossil_df['ID'] == selected_galaxy_name]
+                if not sel_fossil.empty:
+                    s = sel_fossil.iloc[0]
+                    if s['Lit_AGN']:
+                        agn_sources = []
+                        if s['Milliquas']:
+                            agn_sources.append('Milliquas')
+                        if s['SIMBAD_AGN']:
+                            agn_sources.append('SIMBAD')
+                        st.error(f"**{selected_galaxy_name}** — ⛔ **Literature AGN** "
+                                 f"({' + '.join(agn_sources)}) → excluded from scoring")
+                    else:
+                        w1w2_str = f"(W1−W2={s['W1_W2']:.2f})" if np.isfinite(s['W1_W2']) else "(no WISE)"
+                        radio_flag = " 📻 deep detected" if s['DeepRadio'] else ""
+                        xray_flag = " ☢️ deep detected" if s['DeepXray'] else ""
+                        st.markdown(f"""
+                        ---
+                        **{selected_galaxy_name}** — Fossil Score: **{int(s['Fossil_Score'])}/8**  
+                        Kinematics: {int(s['Kin_Score'])}/3 (W80={s['W80']:.0f}) · 
+                        WHAN: {int(s['WHAN_Score'])}/1 · 
+                        MIR Fading: {int(s['MIR_Score'])}/2 {w1w2_str} · 
+                        Mismatch: {int(s['Mismatch'])}/2{radio_flag}{xray_flag}
+                        """)
+            else:
+                st.warning("Could not compute fossil scores. Check that W80 data and crossmatch file are available.")
 
 
 # --- RIGHT COLUMN (SIMULATED SIDEBAR) ---
@@ -2113,17 +2936,6 @@ if st.session_state.show_tools and col_right:
                             'V-Band (Rest)': 'RF_V',
                             'Dust (Av)': 'SED_AV'
                         }
-                        
-                        # Units for each quantity
-                        units = {
-                            'Stellar Mass (LMSTAR)': '[log(M☉)]',
-                            'SFR': '[M☉/yr]',
-                            'Redshift': '',
-                            'Velocity Disp. (σ)': '[km/s]',
-                            'Hα Flux': '[erg/s/cm²]',
-                            'V-Band (Rest)': '[mag]',
-                            'Dust (Av)': '[mag]'
-                        }
 
                         # Get Selections (Defaults if not set)
                         x_lbl = st.session_state.get('qp_x', 'Stellar Mass (LMSTAR)')
@@ -2133,54 +2945,19 @@ if st.session_state.show_tools and col_right:
                         
                         x_key = base_cols.get(x_lbl, 'LMSTAR')
                         y_key = base_cols.get(y_lbl, 'SFR')
-                        
-                        # Get units for display
-                        x_unit = units.get(x_lbl, '')
-                        y_unit = units.get(y_lbl, '')
 
                         # 2. Filter & Transform Data
-                        # Helper function to safely get a single column (handles duplicate column names)
-                        def get_single_column(dataframe, col_name):
-                            """Safely extract a single column even if duplicates exist."""
-                            col_data = dataframe[col_name]
-                            if hasattr(col_data, 'columns'):  # It's a DataFrame (duplicate cols)
-                                return col_data.iloc[:, 0].copy()
-                            return col_data.copy()
-                        
-                        # We create a mini dataframe for plotting, handling potential duplicate columns
-                        ms_df = pd.DataFrame({
-                            x_key: get_single_column(df_cat, x_key),
-                            y_key: get_single_column(df_cat, y_key),
-                            'ID': get_single_column(df_cat, 'ID'),
-                            'FILE': get_single_column(df_cat, 'FILE') if 'FILE' in df_cat.columns else ''
-                        })
+                        # We create a mini dataframe for plotting
+                        ms_df = df_cat[[x_key, y_key, 'ID', 'FILE']].copy()
                         
                         # Apply Log if requested
                         if x_is_log:
                             ms_df[x_key] = np.log10(np.where(ms_df[x_key] > 0, ms_df[x_key], np.nan))
-                            # Update label with log and adjust units
-                            if x_unit and '[log(' in x_unit:
-                                x_lbl = f"Log({x_lbl}) {x_unit}"
-                            elif x_unit:
-                                x_lbl = f"Log({x_lbl}) [log{x_unit[:-1]}]" if x_unit.endswith(']') else f"Log({x_lbl})"
-                            else:
-                                x_lbl = f"Log({x_lbl})"
-                        else:
-                            if x_unit:
-                                x_lbl = f"{x_lbl} {x_unit}"
+                            x_lbl = f"Log({x_lbl})"
                         
                         if y_is_log:
                             ms_df[y_key] = np.log10(np.where(ms_df[y_key] > 0, ms_df[y_key], np.nan))
-                            # Update label with log and adjust units
-                            if y_unit and '[log(' in y_unit:
-                                y_lbl = f"Log({y_lbl}) {y_unit}"
-                            elif y_unit:
-                                y_lbl = f"Log({y_lbl}) [log{y_unit[:-1]}]" if y_unit.endswith(']') else f"Log({y_lbl})"
-                            else:
-                                y_lbl = f"Log({y_lbl})"
-                        else:
-                            if y_unit:
-                                y_lbl = f"{y_lbl} {y_unit}"
+                            y_lbl = f"Log({y_lbl})"
                             
                         ms_df = ms_df.dropna()
 
@@ -2209,16 +2986,11 @@ if st.session_state.show_tools and col_right:
                                 
                                 # Plot Selected
                                 if not cur.empty:
-                                    try:
-                                        cx = float(cur[x_key].iloc[0])
-                                        cy = float(cur[y_key].iloc[0])
-                                    except (KeyError, IndexError, TypeError, ValueError):
-                                        cx, cy = np.nan, np.nan
+                                    cx, cy = cur.iloc[0][x_key], cur.iloc[0][y_key]
                                     # Check boundaries (in case log made it NaN or infinite)
                                     if np.isfinite(cx) and np.isfinite(cy):
                                         ax_x.scatter(cx, cy, s=200, facecolors='none', edgecolors='red', linewidth=2)
-                                        y_range = float(ms_df[y_key].max()) - float(ms_df[y_key].min())
-                                        ax_x.annotate('THIS ONE', xy=(cx, cy), xytext=(cx, cy + y_range * 0.1),
+                                        ax_x.annotate('THIS ONE', xy=(cx, cy), xytext=(cx, cy + (ms_df[y_key].max() - ms_df[y_key].min())*0.1),
                                                     arrowprops=dict(arrowstyle='->', color='red'), color='red', fontsize=10)
                                 
                                 # Labels
@@ -2307,11 +3079,7 @@ if st.session_state.show_tools and col_right:
                                 # Highlight current galaxy
                                 cur_whan = whan_df[whan_df['ID'] == selected_galaxy_name]
                                 if not cur_whan.empty:
-                                    try:
-                                        cx = float(cur_whan['log_NII_HA'].iloc[0])
-                                        cy = float(cur_whan['EW_HA'].iloc[0])
-                                    except (KeyError, IndexError, TypeError, ValueError):
-                                        cx, cy = np.nan, np.nan
+                                    cx, cy = cur_whan.iloc[0]['log_NII_HA'], cur_whan.iloc[0]['EW_HA']
                                     if np.isfinite(cx) and np.isfinite(cy):
                                         ax_whan.scatter(cx, cy, s=200, facecolors='none', edgecolors='yellow', linewidth=3, zorder=10)
                                         ax_whan.annotate('YOU', xy=(cx, cy), xytext=(cx + 0.15, cy * 1.5),
@@ -2348,11 +3116,7 @@ if st.session_state.show_tools and col_right:
                         
                         # Show current galaxy class
                         if not cur_whan.empty:
-                            try:
-                                whan_cls = str(cur_whan['WHAN_CLS'].iloc[0])
-                            except (KeyError, IndexError, TypeError, ValueError):
-                                whan_cls = 'Unknown'
-                            st.caption(f"**{selected_galaxy_name}**: {whan_cls}")
+                            st.caption(f"**{selected_galaxy_name}**: {cur_whan.iloc[0]['WHAN_CLS']}")
                     else:
                         st.caption("No WHAN data available")
 
@@ -2373,31 +3137,9 @@ if st.session_state.show_tools and col_right:
                                     "⭐ Best Velocity": "COMP_VEL", 
                                     "⭐ W80": "COMP_W80"
                                 }
-                                # Units for histogram maps
-                                hist_units = {
-                                    "⭐ Best Flux": "[erg/s/cm²]",
-                                    "⭐ Best Velocity": "[km/s]",
-                                    "⭐ W80": "[km/s]",
-                                    "COMP_FLUX": "[erg/s/cm²]",
-                                    "COMP_VEL": "[km/s]",
-                                    "COMP_W80": "[km/s]"
-                                }
                                 for ext in map_ext_hist:
                                     if ext not in ['PRIMARY', 'BIN_NUM']:
                                         hist_options[ext] = ext
-                                        # Assign units based on extension name patterns
-                                        if 'VEL' in ext.upper() or ext.startswith('B') or ext.startswith('C'):
-                                            hist_units[ext] = "[km/s]"
-                                        elif 'FLUX' in ext.upper() or 'HA' in ext.upper() or 'NII' in ext.upper() or 'OIII' in ext.upper():
-                                            hist_units[ext] = "[erg/s/cm²]"
-                                        elif 'SIG' in ext.upper() or 'W80' in ext.upper():
-                                            hist_units[ext] = "[km/s]"
-                                        elif 'EW' in ext.upper():
-                                            hist_units[ext] = "[Å]"
-                                        elif 'CHI' in ext.upper():
-                                            hist_units[ext] = ""
-                                        else:
-                                            hist_units[ext] = ""
                                 
                                 # Controls row
                                 c1, c2 = st.columns([2, 1])
@@ -2441,27 +3183,21 @@ if st.session_state.show_tools and col_right:
                                         
                                         mean_val, median_val = np.mean(clipped), np.median(clipped)
                                         
-                                        # Get unit for the selected map
-                                        x_unit_hist = hist_units.get(selected_hist_map, hist_units.get(map_key, ''))
-                                        x_title_hist = f"{selected_hist_map} {x_unit_hist}".strip()
-                                        
                                         fig_hist = go.Figure()
                                         fig_hist.add_trace(go.Histogram(x=clipped, nbinsx=35, marker_color='#00CCFF', opacity=0.75))
                                         fig_hist.add_vline(x=mean_val, line_color="yellow", line_width=1.5)
                                         fig_hist.add_vline(x=median_val, line_dash="dash", line_color="lime", line_width=1.5)
                                         
                                         fig_hist.update_layout(
-                                            height=180, margin=dict(l=35, r=5, t=5, b=40),
+                                            height=180, margin=dict(l=35, r=5, t=5, b=30),
                                             paper_bgcolor='rgba(0,0,0,0)', plot_bgcolor='#1E293B',
-                                            xaxis=dict(title=dict(text=x_title_hist, font=dict(color='gray', size=9)), gridcolor='#334155', tickfont=dict(color='gray', size=8)),
-                                            yaxis=dict(title=dict(text="Count", font=dict(color='gray', size=9)), type="log" if log_y else "linear", gridcolor='#334155', tickfont=dict(color='gray', size=8)),
+                                            xaxis=dict(gridcolor='#334155', tickfont=dict(color='gray', size=8)),
+                                            yaxis=dict(type="log" if log_y else "linear", gridcolor='#334155', tickfont=dict(color='gray', size=8)),
                                             showlegend=False
                                         )
                                         st.plotly_chart(fig_hist, use_container_width=True, config={'displayModeBar': False})
                                         
-                                        # Include units in the stats caption
-                                        unit_str = x_unit_hist.replace('[', '').replace(']', '') if x_unit_hist else ''
-                                        st.caption(f"μ={mean_val:.1f} {unit_str} | med={median_val:.1f} {unit_str} | σ={np.std(clipped):.1f} {unit_str} | n={len(clipped)}")
+                                        st.caption(f"μ={mean_val:.1f} | med={median_val:.1f} | σ={np.std(clipped):.1f} | n={len(clipped)}")
                                     else:
                                         st.caption("No valid data")
                                 else:
@@ -2498,17 +3234,17 @@ if st.session_state.show_tools and col_right:
                             fig_res.add_vline(x=mean_res, line_dash="dot", line_color="cyan", line_width=1.5)
                             
                             fig_res.update_layout(
-                                height=180, margin=dict(l=35, r=5, t=5, b=40),
+                                height=180, margin=dict(l=35, r=5, t=5, b=30),
                                 paper_bgcolor='rgba(0,0,0,0)', plot_bgcolor='#1E293B',
-                                xaxis=dict(title=dict(text="Residuals [σ]", font=dict(color='gray', size=9)), range=[-x_range, x_range], gridcolor='#334155', tickfont=dict(color='gray', size=8)),
-                                yaxis=dict(title=dict(text="Count", font=dict(color='gray', size=9)), type="log" if log_y_res else "linear", gridcolor='#334155', tickfont=dict(color='gray', size=8)),
+                                xaxis=dict(range=[-x_range, x_range], gridcolor='#334155', tickfont=dict(color='gray', size=8)),
+                                yaxis=dict(type="log" if log_y_res else "linear", gridcolor='#334155', tickfont=dict(color='gray', size=8)),
                                 showlegend=False
                             )
                             st.plotly_chart(fig_res, use_container_width=True, config={'displayModeBar': False})
                             
                             # Compact stats with quality indicator
                             q_col = "lime" if 0.8 < std_res < 1.2 else "orange" if 0.5 < std_res < 1.5 else "red"
-                            st.caption(f"μ={mean_res:.2f} σ | σ=<span style='color:{q_col}'>{std_res:.2f}</span> | n={len(clipped)}", unsafe_allow_html=True)
+                            st.caption(f"μ={mean_res:.2f} | σ=<span style='color:{q_col}'>{std_res:.2f}</span> | n={len(clipped)}", unsafe_allow_html=True)
                         else:
                             st.caption("No valid data")
                     else:
@@ -2516,37 +3252,28 @@ if st.session_state.show_tools and col_right:
 
 
             # --- C. MODULES (Card Style) ---
-            # with st.container(border=True):
-            #     st.markdown("##### 🚀 Launchers")
+            '''with st.container(border=True):
+                st.markdown("##### 🚀 Launchers")
                 
-            #     # Detect if running on Streamlit Cloud
-            #     is_cloud = os.environ.get('STREAMLIT_SHARING_MODE') or os.path.exists('/mount/src')
-                
-            #     if is_cloud:
-            #         st.warning("⚠️ PyQt apps cannot run on Streamlit Cloud. Use these launchers when running locally.", icon="🖥️")
-                
-            #     def run_script(script_name, label):
-            #         if is_cloud:
-            #             st.error("🚫 Desktop apps require local execution. Run `streamlit run Streamlit_overview.py` on your machine.")
-            #             return
-            #         if os.path.exists(script_name):
-            #             try:
-            #                 subprocess.Popen([sys.executable, script_name, fits_file_path])
-            #                 st.toast(f"🚀 {label} launched!", icon="✅")
-            #             except Exception as e: st.error(f"Failed: {e}")
-            #         else: st.error(f"Script '{script_name}' not found.")
+                def run_script(script_name, label):
+                    if os.path.exists(script_name):
+                        try:
+                            subprocess.Popen([sys.executable, script_name, fits_file_path])
+                            st.toast(f"🚀 {label} launched!", icon="✅")
+                        except Exception as e: st.error(f"Failed: {e}")
+                    else: st.error(f"Script '{script_name}' not found.")
 
-            #     # Using columns for buttons to make them look like a grid or full width
-            #     # Here we stick to full width for readability
-            #     if st.button("📊 Stacked Spectra", width='stretch', help="Open Spectral Stacking GUI"): 
-            #         run_script("GUI_stacked_spectra.py", "Stacked Spectra")
+                # Using columns for buttons to make them look like a grid or full width
+                # Here we stick to full width for readability
+                if st.button("📊 Stacked Spectra", width='stretch', help="Open Spectral Stacking GUI"): 
+                    run_script("GUI_stacked_spectra.py", "Stacked Spectra")
                     
-            #     if st.button("🌀 Kinematik GUI", width='stretch', help="Open W80 & Velocity Analysis"): 
-            #         run_script("w80_gui copy.py", "Kinematik GUI")
+                if st.button("🌀 Kinematik GUI", width='stretch', help="Open W80 & Velocity Analysis"): 
+                    run_script("w80_gui copy.py", "Kinematik GUI")
                     
-            #     if st.button("🔭 Ergebnisse GUI", width='stretch', help="View Final Results"): 
-            #         run_script("program_runner.py", "Ergebnisse GUI")
-
+                if st.button("🔭 Ergebnisse GUI", width='stretch', help="View Final Results"): 
+                    run_script("program_runner.py", "Ergebnisse GUI")
+            '''
             st.write("") # Small spacer
             # Only works if your streamlit version is >= 1.30
             st.html("""
