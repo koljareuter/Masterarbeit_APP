@@ -3251,29 +3251,6 @@ if st.session_state.show_tools and col_right:
                         st.caption("Select a pixel in Kinematic Maps first")
 
 
-            # --- C. MODULES (Card Style) ---
-            '''with st.container(border=True):
-                st.markdown("##### 🚀 Launchers")
-                
-                def run_script(script_name, label):
-                    if os.path.exists(script_name):
-                        try:
-                            subprocess.Popen([sys.executable, script_name, fits_file_path])
-                            st.toast(f"🚀 {label} launched!", icon="✅")
-                        except Exception as e: st.error(f"Failed: {e}")
-                    else: st.error(f"Script '{script_name}' not found.")
-
-                # Using columns for buttons to make them look like a grid or full width
-                # Here we stick to full width for readability
-                if st.button("📊 Stacked Spectra", width='stretch', help="Open Spectral Stacking GUI"): 
-                    run_script("GUI_stacked_spectra.py", "Stacked Spectra")
-                    
-                if st.button("🌀 Kinematik GUI", width='stretch', help="Open W80 & Velocity Analysis"): 
-                    run_script("w80_gui copy.py", "Kinematik GUI")
-                    
-                if st.button("🔭 Ergebnisse GUI", width='stretch', help="View Final Results"): 
-                    run_script("program_runner.py", "Ergebnisse GUI")
-            '''
             st.write("") # Small spacer
             # Only works if your streamlit version is >= 1.30
             st.html("""
