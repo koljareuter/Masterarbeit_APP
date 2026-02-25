@@ -1430,16 +1430,15 @@ if catalog_links:
         )
     
     html_content += '</div>'
-    st.sidebar.markdown(html_content, unsafe_allow_html=True)
+    st.sidebar.html(html_content)
 else:
-    st.sidebar.markdown(
+    st.sidebar.html(
         '<div style="background-color:#1a1a2e; border:1px solid #334155; '
         'border-radius:8px; padding:12px; margin:8px 0; color:#6B7280; '
         'font-size:0.9em;">'
         '📡 No crossmatch data available.<br>'
         '<span style="font-size:0.8em;">Run Crossmatch_generator.py first.</span>'
-        '</div>',
-        unsafe_allow_html=True
+        '</div>'
     )
 
 
@@ -1825,13 +1824,25 @@ with col_main:
                         hovertemplate='S/N: %{y:.2f}<extra></extra>'
                     ))
 
-                # 3. Scaling
-                valid_y = y_data[np.isfinite(y_data)]
-                if len(valid_y) > 0:
-                    y_min, y_max = np.min(valid_y), np.max(valid_y)
+                # 3. Scaling — compute y-range from the default x-zoom window
+                #    so the spectrum isn't zoomed out to the full spectral range
+                ha_center_rest = 0.65628  # Hα rest wavelength in µm
+                zoom_half_width = 0.008   # ±8nm around center
+
+                if show_rest_frame:
+                    default_x_range = [ha_center_rest - zoom_half_width, ha_center_rest + zoom_half_width]
+                else:
+                    default_x_range = [(ha_center_rest - zoom_half_width) * (1 + z_val), 
+                                       (ha_center_rest + zoom_half_width) * (1 + z_val)]
+
+                # Filter y_data to only the visible x-window for y-axis scaling
+                x_mask = (wave_plot >= default_x_range[0]) & (wave_plot <= default_x_range[1])
+                visible_y = y_data[x_mask & np.isfinite(y_data)]
+                if len(visible_y) > 0:
+                    y_min, y_max = np.min(visible_y), np.max(visible_y)
                     y_range_pixels = y_max - y_min
                     if y_range_pixels == 0: y_range_pixels = 1.0
-                    y_range = [y_min - 0.1 * y_range_pixels, y_max + 0.1 * y_range_pixels]
+                    y_range = [y_min - 0.1 * y_range_pixels, y_max + 0.15 * y_range_pixels]
                 else:
                     y_range = None
 
@@ -1850,18 +1861,7 @@ with col_main:
                         )
 
                 # --- DEFAULT ZOOM ON Hα AND [NII] LINES ---
-                # Rest-frame wavelengths: [NII]6548=0.65480, Hα=0.65628, [NII]6583=0.65834
-                # Default zoom range: ~0.648 - 0.665 µm (rest-frame), adjusted for redshift if needed
-                ha_center_rest = 0.65628  # Hα rest wavelength in µm
-                zoom_half_width = 0.008   # ±8nm around center (covers [NII] doublet + Hα)
-                
-                if show_rest_frame:
-                    # Rest-frame: use rest wavelengths directly
-                    default_x_range = [ha_center_rest - zoom_half_width, ha_center_rest + zoom_half_width]
-                else:
-                    # Observed frame: shift by (1 + z)
-                    default_x_range = [(ha_center_rest - zoom_half_width) * (1 + z_val), 
-                                       (ha_center_rest + zoom_half_width) * (1 + z_val)]
+                # (default_x_range already computed above for y-axis scaling)
 
                 fig_spec.update_layout(
                     height=450,
@@ -2694,7 +2694,7 @@ with col_main:
                         marker_color=bar_colors,
                         text=fossil_non_agn['Fossil_Score'],
                         textposition='outside',
-                        textfont=dict(size=8, color='gray'),
+                        textfont=dict(size=11, color='gray'),
                         hovertemplate=(
                             '<b>%{x}</b><br>'
                             'Fossil Score: %{y}/8<br>'
@@ -2713,11 +2713,11 @@ with col_main:
                         )
                     
                     fig_dist.update_layout(
-                        height=280, template="plotly_dark",
-                        margin=dict(l=40, r=10, t=10, b=80),
-                        xaxis=dict(tickangle=-45, tickfont=dict(size=7), title=None),
+                        height=320, template="plotly_dark",
+                        margin=dict(l=40, r=10, t=10, b=100),
+                        xaxis=dict(tickangle=-45, tickfont=dict(size=10), title=None),
                         yaxis=dict(title="Fossil Score", range=[0, 9],
-                                   dtick=1, gridcolor='#334155'),
+                                   dtick=1, gridcolor='#334155', tickfont=dict(size=11)),
                         bargap=0.15, showlegend=False,
                     )
                     st.plotly_chart(fig_dist, use_container_width=True,
