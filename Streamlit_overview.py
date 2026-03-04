@@ -676,18 +676,14 @@ def compute_fossil_scores(galaxy_list, sorted_galaxy_data, crossmatch_df,
     
     Scoring (0–8 scale, higher = stronger fossil candidate):
     
-    KINEMATIC EVIDENCE (0–3):
-      W80 > 600 km/s → 3  |  400–600 → 2  |  200–400 → 1  |  <200 → 0
+    KINEMATIC EVIDENCE (0–5):
+      W80 > 800 km/s → 5  |  600–800 → 4  |  400–600 → 3  |  300–400 → 2  |  200–300 → 1  |  <200 → 0
     
     WHAN ABSENCE (0–1):
       WHAN class is NOT AGN (sAGN/wAGN) → 1
     
     MID-IR FADING (0–2):
       WISE W1−W2 < 0.5 → 2  |  0.5–0.8 → 1  |  ≥ 0.8 (AGN-like) → 0
-    
-    MISMATCH BONUS (0–2):
-      High W80 (≥400) AND low W1−W2 (<0.8) → 2
-      Moderate W80 (200–400) AND low W1−W2 (<0.8) → 1
     
     Deep radio/X-ray detections are tracked as INFORMATIONAL flags
     (VLA 3GHz, VLA E-CDFS, CDF-S 7Ms, Chandra COSMOS, X-UDS)
@@ -806,15 +802,18 @@ def compute_fossil_scores(galaxy_list, sorted_galaxy_data, crossmatch_df,
                 'Kin_Score': 0,
                 'WHAN_Score': 0,
                 'MIR_Score': 0,
-                'Mismatch': 0,
                 'Fossil_Score': 0,
             })
             continue
         
-        # --- Kinematic score (0–3) ---
-        if w80 >= 600:
-            kin_score = 3
+        # --- Kinematic score (0–5) ---
+        if w80 >= 800:
+            kin_score = 5
+        elif w80 >= 600:
+            kin_score = 4
         elif w80 >= 400:
+            kin_score = 3
+        elif w80 >= 300:
             kin_score = 2
         elif w80 >= 200:
             kin_score = 1
@@ -835,15 +834,7 @@ def compute_fossil_scores(galaxy_list, sorted_galaxy_data, crossmatch_df,
         else:
             mir_score = 1  # no WISE data = neutral
         
-        # --- Mismatch bonus (0–2) ---
-        mismatch = 0
-        if np.isfinite(w1w2) and w1w2 < 0.8:
-            if w80 >= 400:
-                mismatch = 2
-            elif w80 >= 200:
-                mismatch = 1
-        
-        total = kin_score + whan_score + mir_score + mismatch
+        total = kin_score + whan_score + mir_score
         
         rows.append({
             'ID': gal_name,
@@ -858,7 +849,6 @@ def compute_fossil_scores(galaxy_list, sorted_galaxy_data, crossmatch_df,
             'Kin_Score': kin_score,
             'WHAN_Score': whan_score,
             'MIR_Score': mir_score,
-            'Mismatch': mismatch,
             'Fossil_Score': total,
         })
     
@@ -2408,9 +2398,12 @@ with col_main:
                     height=600, template="plotly_dark",
                     margin=dict(l=80, r=20, t=40, b=60),
                     xaxis_title=x_title, yaxis_title=y_title,
+                    font=dict(size=14),
+                    xaxis=dict(title_font=dict(size=16), tickfont=dict(size=13)),
+                    yaxis=dict(title_font=dict(size=16), tickfont=dict(size=13)),
                     hovermode='closest', dragmode=False,
                     legend=dict(orientation="v", y=0.98, x=0.02, xanchor='left', yanchor='middle',
-                                font=dict(color='#F1F5F9')),
+                                font=dict(color='#F1F5F9', size=13)),
                     uirevision="corr_plot_interactive",
                 )
                 
@@ -2477,15 +2470,21 @@ with col_main:
                         
                         # Color data
                         if wise_color_by == "W80 (km/s)" and 'W80' in plot_wise.columns:
-                            color_data = plot_wise['W80']
+                            color_data = plot_wise['W80'].copy()
+                            # Replace NaN/inf with None so Plotly handles them correctly
+                            color_data = color_data.where(color_data.notna() & np.isfinite(color_data), other=None)
+                            has_valid_color = color_data.notna().any()
                             cbar_title = "W80 (km/s)"
                             colorscale = 'Hot'
                         elif wise_color_by == "W1−W2":
-                            color_data = plot_wise['W1_W2']
+                            color_data = plot_wise['W1_W2'].copy()
+                            color_data = color_data.where(color_data.notna() & np.isfinite(color_data), other=None)
+                            has_valid_color = color_data.notna().any()
                             cbar_title = "W1−W2"
                             colorscale = 'RdYlBu_r'
                         else:
                             color_data = None
+                            has_valid_color = False
                             cbar_title = None
                             colorscale = None
                         
@@ -2500,7 +2499,7 @@ with col_main:
                                 line_width=2, opacity=0.8,
                                 annotation_text="Stern+12 (W1−W2=0.8)",
                                 annotation_position="top left",
-                                annotation_font=dict(color="#FF4B4B", size=11)
+                                annotation_font=dict(color="#FF4B4B", size=13)
                             )
                             
                             # Mateos+2012 AGN wedge (approximate parametric boundaries)
@@ -2526,11 +2525,13 @@ with col_main:
                             opacity=0.8,
                             line=dict(width=0.5, color='rgba(255,255,255,0.3)')
                         )
-                        if color_data is not None:
-                            marker_dict['color'] = color_data
+                        if color_data is not None and has_valid_color:
+                            marker_dict['color'] = color_data.tolist()
                             marker_dict['colorscale'] = colorscale
                             marker_dict['showscale'] = True
-                            marker_dict['colorbar'] = dict(title=cbar_title, thickness=15)
+                            marker_dict['colorbar'] = dict(title=cbar_title, thickness=15,
+                                                           title_font=dict(size=13),
+                                                           tickfont=dict(size=12))
                         else:
                             marker_dict['color'] = '#00CCFF'
                         
@@ -2572,11 +2573,12 @@ with col_main:
                             margin=dict(l=80, r=20, t=40, b=60),
                             xaxis_title="W2 − W3 (Vega mag)",
                             yaxis_title="W1 − W2 (Vega mag)",
+                            font=dict(size=14),
+                            xaxis=dict(range=[-0.5, 6.5], title_font=dict(size=16), tickfont=dict(size=13)),
+                            yaxis=dict(range=[-0.5, 2.5], title_font=dict(size=16), tickfont=dict(size=13)),
                             hovermode='closest', dragmode=False,
                             legend=dict(orientation="h", y=1.02, x=0.5, xanchor='center',
-                                        font=dict(color='#F1F5F9', size=11)),
-                            xaxis=dict(range=[-0.5, 6.5]),
-                            yaxis=dict(range=[-0.5, 2.5]),
+                                        font=dict(color='#F1F5F9', size=13)),
                         )
                         
                         # Click to select galaxy
@@ -2715,9 +2717,11 @@ with col_main:
                     fig_dist.update_layout(
                         height=280, template="plotly_dark",
                         margin=dict(l=40, r=10, t=10, b=80),
-                        xaxis=dict(tickangle=-45, tickfont=dict(size=7), title=None),
+                        font=dict(size=14),
+                        xaxis=dict(tickangle=-45, tickfont=dict(size=9), title=None),
                         yaxis=dict(title="Fossil Score", range=[0, 9],
-                                   dtick=1, gridcolor='#334155'),
+                                   dtick=1, gridcolor='#334155',
+                                   title_font=dict(size=16), tickfont=dict(size=13)),
                         bargap=0.15, showlegend=False,
                     )
                     st.plotly_chart(fig_dist, width='stretch',
@@ -2741,7 +2745,7 @@ with col_main:
                     ⛔ *Lit. AGN → 0*  
                     Milliquas OR SIMBAD
                     
-                    *Kinematics (0–3)*  
+                    *Kinematics (0–5)*  
                     W80 strength
                     
                     *WHAN (0–1)*  
@@ -2749,9 +2753,6 @@ with col_main:
                     
                     *MIR Fading (0–2)*  
                     W1−W2 below AGN
-                    
-                    *Mismatch (0–2)*  
-                    High W80 + faded MIR
                     """, unsafe_allow_html=True)
                 
                 # --- Scatter: W80 vs Fossil Score ---
@@ -2816,10 +2817,13 @@ with col_main:
                     margin=dict(l=60, r=20, t=30, b=60),
                     xaxis_title="Mean W80 (km/s)",
                     yaxis_title="Fossil Score (0–8)",
-                    yaxis=dict(range=[-0.5, 9], dtick=1, gridcolor='#334155'),
+                    font=dict(size=14),
+                    xaxis=dict(title_font=dict(size=16), tickfont=dict(size=13)),
+                    yaxis=dict(range=[-0.5, 9], dtick=1, gridcolor='#334155',
+                               title_font=dict(size=16), tickfont=dict(size=13)),
                     hovermode='closest', dragmode=False,
                     legend=dict(orientation="h", y=1.05, x=0.5, xanchor='center',
-                                font=dict(color='#F1F5F9', size=11)),
+                                font=dict(color='#F1F5F9', size=13)),
                 )
                 
                 st.plotly_chart(fig_scatter, width='stretch',
@@ -2840,10 +2844,10 @@ with col_main:
                     # Format for display
                     display_cols = ['ID', 'Fossil_Score', 'W80', 'W1_W2',
                                     'Kin_Score', 'WHAN_Score', 'MIR_Score',
-                                    'Mismatch', 'DeepRadio', 'DeepXray']
+                                    'DeepRadio', 'DeepXray']
                     display_df = top_df[display_cols].copy()
                     display_df.columns = ['Galaxy', 'Score', 'W80', 'W1−W2',
-                                          'Kin', 'WHAN', 'MIR', 'Mismatch', 'Radio', 'X-ray']
+                                          'Kin', 'WHAN', 'MIR', 'Radio', 'X-ray']
                     
                     # Style: highlight the selected galaxy row
                     def highlight_selected(row):
@@ -2878,10 +2882,9 @@ with col_main:
                         st.markdown(f"""
                         ---
                         **{selected_galaxy_name}** — Fossil Score: **{int(s['Fossil_Score'])}/8**  
-                        Kinematics: {int(s['Kin_Score'])}/3 (W80={s['W80']:.0f}) · 
+                        Kinematics: {int(s['Kin_Score'])}/5 (W80={s['W80']:.0f}) · 
                         WHAN: {int(s['WHAN_Score'])}/1 · 
-                        MIR Fading: {int(s['MIR_Score'])}/2 {w1w2_str} · 
-                        Mismatch: {int(s['Mismatch'])}/2{radio_flag}{xray_flag}
+                        MIR Fading: {int(s['MIR_Score'])}/2 {w1w2_str}{radio_flag}{xray_flag}
                         """)
             else:
                 st.warning("Could not compute fossil scores. Check that W80 data and crossmatch file are available.")
