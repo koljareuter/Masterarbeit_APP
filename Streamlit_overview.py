@@ -1430,15 +1430,16 @@ if catalog_links:
         )
     
     html_content += '</div>'
-    st.sidebar.html(html_content)
+    st.sidebar.markdown(html_content, unsafe_allow_html=True)
 else:
-    st.sidebar.html(
+    st.sidebar.markdown(
         '<div style="background-color:#1a1a2e; border:1px solid #334155; '
         'border-radius:8px; padding:12px; margin:8px 0; color:#6B7280; '
         'font-size:0.9em;">'
         '📡 No crossmatch data available.<br>'
         '<span style="font-size:0.8em;">Run Crossmatch_generator.py first.</span>'
-        '</div>'
+        '</div>',
+        unsafe_allow_html=True
     )
 
 
@@ -1824,25 +1825,13 @@ with col_main:
                         hovertemplate='S/N: %{y:.2f}<extra></extra>'
                     ))
 
-                # 3. Scaling — compute y-range from the default x-zoom window
-                #    so the spectrum isn't zoomed out to the full spectral range
-                ha_center_rest = 0.65628  # Hα rest wavelength in µm
-                zoom_half_width = 0.008   # ±8nm around center
-
-                if show_rest_frame:
-                    default_x_range = [ha_center_rest - zoom_half_width, ha_center_rest + zoom_half_width]
-                else:
-                    default_x_range = [(ha_center_rest - zoom_half_width) * (1 + z_val), 
-                                       (ha_center_rest + zoom_half_width) * (1 + z_val)]
-
-                # Filter y_data to only the visible x-window for y-axis scaling
-                x_mask = (wave_plot >= default_x_range[0]) & (wave_plot <= default_x_range[1])
-                visible_y = y_data[x_mask & np.isfinite(y_data)]
-                if len(visible_y) > 0:
-                    y_min, y_max = np.min(visible_y), np.max(visible_y)
+                # 3. Scaling
+                valid_y = y_data[np.isfinite(y_data)]
+                if len(valid_y) > 0:
+                    y_min, y_max = np.min(valid_y), np.max(valid_y)
                     y_range_pixels = y_max - y_min
                     if y_range_pixels == 0: y_range_pixels = 1.0
-                    y_range = [y_min - 0.1 * y_range_pixels, y_max + 0.15 * y_range_pixels]
+                    y_range = [y_min - 0.1 * y_range_pixels, y_max + 0.1 * y_range_pixels]
                 else:
                     y_range = None
 
@@ -1861,7 +1850,18 @@ with col_main:
                         )
 
                 # --- DEFAULT ZOOM ON Hα AND [NII] LINES ---
-                # (default_x_range already computed above for y-axis scaling)
+                # Rest-frame wavelengths: [NII]6548=0.65480, Hα=0.65628, [NII]6583=0.65834
+                # Default zoom range: ~0.648 - 0.665 µm (rest-frame), adjusted for redshift if needed
+                ha_center_rest = 0.65628  # Hα rest wavelength in µm
+                zoom_half_width = 0.008   # ±8nm around center (covers [NII] doublet + Hα)
+                
+                if show_rest_frame:
+                    # Rest-frame: use rest wavelengths directly
+                    default_x_range = [ha_center_rest - zoom_half_width, ha_center_rest + zoom_half_width]
+                else:
+                    # Observed frame: shift by (1 + z)
+                    default_x_range = [(ha_center_rest - zoom_half_width) * (1 + z_val), 
+                                       (ha_center_rest + zoom_half_width) * (1 + z_val)]
 
                 fig_spec.update_layout(
                     height=450,
@@ -2694,7 +2694,7 @@ with col_main:
                         marker_color=bar_colors,
                         text=fossil_non_agn['Fossil_Score'],
                         textposition='outside',
-                        textfont=dict(size=11, color='gray'),
+                        textfont=dict(size=8, color='gray'),
                         hovertemplate=(
                             '<b>%{x}</b><br>'
                             'Fossil Score: %{y}/8<br>'
@@ -2713,14 +2713,14 @@ with col_main:
                         )
                     
                     fig_dist.update_layout(
-                        height=320, template="plotly_dark",
-                        margin=dict(l=40, r=10, t=10, b=100),
-                        xaxis=dict(tickangle=-45, tickfont=dict(size=10), title=None),
+                        height=280, template="plotly_dark",
+                        margin=dict(l=40, r=10, t=10, b=80),
+                        xaxis=dict(tickangle=-45, tickfont=dict(size=7), title=None),
                         yaxis=dict(title="Fossil Score", range=[0, 9],
-                                   dtick=1, gridcolor='#334155', tickfont=dict(size=11)),
+                                   dtick=1, gridcolor='#334155'),
                         bargap=0.15, showlegend=False,
                     )
-                    st.plotly_chart(fig_dist, use_container_width=True,
+                    st.plotly_chart(fig_dist, width='stretch',
                                    config={'displayModeBar': False})
                     
                     if n_excluded > 0:
@@ -2822,7 +2822,7 @@ with col_main:
                                 font=dict(color='#F1F5F9', size=11)),
                 )
                 
-                st.plotly_chart(fig_scatter, use_container_width=True,
+                st.plotly_chart(fig_scatter, width='stretch',
                                config={'displayModeBar': False})
                 
                 # --- Detailed table for top candidates ---
@@ -2857,7 +2857,7 @@ with col_main:
                         'Score': '{:.0f}',
                     })
                     
-                    st.dataframe(styled, use_container_width=True, hide_index=True, height=400)
+                    st.dataframe(styled, width='stretch', hide_index=True, height=400)
                 
                 # Selected galaxy breakdown (shown for all, including excluded AGN)
                 sel_fossil = fossil_df[fossil_df['ID'] == selected_galaxy_name]
@@ -3111,7 +3111,7 @@ if st.session_state.show_tools and col_right:
                                 ax_whan.spines['left'].set_color('gray')
                                 
                                 plt.tight_layout()
-                                st.pyplot(fig_whan, use_container_width=True, transparent=True)
+                                st.pyplot(fig_whan, width='stretch', transparent=True)
                                 plt.close(fig_whan)
                         
                         # Show current galaxy class
@@ -3195,7 +3195,7 @@ if st.session_state.show_tools and col_right:
                                             yaxis=dict(type="log" if log_y else "linear", gridcolor='#334155', tickfont=dict(color='gray', size=8)),
                                             showlegend=False
                                         )
-                                        st.plotly_chart(fig_hist, use_container_width=True, config={'displayModeBar': False})
+                                        st.plotly_chart(fig_hist, width='stretch', config={'displayModeBar': False})
                                         
                                         st.caption(f"μ={mean_val:.1f} | med={median_val:.1f} | σ={np.std(clipped):.1f} | n={len(clipped)}")
                                     else:
@@ -3240,7 +3240,7 @@ if st.session_state.show_tools and col_right:
                                 yaxis=dict(type="log" if log_y_res else "linear", gridcolor='#334155', tickfont=dict(color='gray', size=8)),
                                 showlegend=False
                             )
-                            st.plotly_chart(fig_res, use_container_width=True, config={'displayModeBar': False})
+                            st.plotly_chart(fig_res, width='stretch', config={'displayModeBar': False})
                             
                             # Compact stats with quality indicator
                             q_col = "lime" if 0.8 < std_res < 1.2 else "orange" if 0.5 < std_res < 1.5 else "red"
@@ -3250,6 +3250,29 @@ if st.session_state.show_tools and col_right:
                     else:
                         st.caption("Select a pixel in Kinematic Maps first")
 
+
+            # --- C. MODULES (Card Style) ---
+            with st.container(border=True):
+                st.markdown("##### 🚀 Launchers")
+                
+                def run_script(script_name, label):
+                    if os.path.exists(script_name):
+                        try:
+                            subprocess.Popen([sys.executable, script_name, fits_file_path])
+                            st.toast(f"🚀 {label} launched!", icon="✅")
+                        except Exception as e: st.error(f"Failed: {e}")
+                    else: st.error(f"Script '{script_name}' not found.")
+
+                # Using columns for buttons to make them look like a grid or full width
+                # Here we stick to full width for readability
+                if st.button("📊 Stacked Spectra", width='stretch', help="Open Spectral Stacking GUI"): 
+                    run_script("GUI_stacked_spectra.py", "Stacked Spectra")
+                    
+                if st.button("🌀 Kinematik GUI", width='stretch', help="Open W80 & Velocity Analysis"): 
+                    run_script("w80_gui copy.py", "Kinematik GUI")
+                    
+                if st.button("🔭 Ergebnisse GUI", width='stretch', help="View Final Results"): 
+                    run_script("program_runner.py", "Ergebnisse GUI")
 
             st.write("") # Small spacer
             # Only works if your streamlit version is >= 1.30
