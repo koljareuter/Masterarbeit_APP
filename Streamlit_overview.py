@@ -1815,15 +1815,8 @@ with col_main:
                         hovertemplate='S/N: %{y:.2f}<extra></extra>'
                     ))
 
-                # 3. Scaling
-                valid_y = y_data[np.isfinite(y_data)]
-                if len(valid_y) > 0:
-                    y_min, y_max = np.min(valid_y), np.max(valid_y)
-                    y_range_pixels = y_max - y_min
-                    if y_range_pixels == 0: y_range_pixels = 1.0
-                    y_range = [y_min - 0.1 * y_range_pixels, y_max + 0.1 * y_range_pixels]
-                else:
-                    y_range = None
+                # 3. Store y_data for y-axis zooming later
+                # (y_range is computed below based on the visible x-window)
 
                 # 4. Lines
                 lines = {'[NII]6548': 0.65480, 'Hα': 0.65628, '[NII]6583': 0.65834}
@@ -1853,6 +1846,17 @@ with col_main:
                     default_x_range = [(ha_center_rest - zoom_half_width) * (1 + z_val), 
                                        (ha_center_rest + zoom_half_width) * (1 + z_val)]
 
+                # --- Y-AXIS ZOOM: fit to flux data within the visible x-window ---
+                x_mask = (wave_plot >= default_x_range[0]) & (wave_plot <= default_x_range[1])
+                visible_flux = y_data[x_mask]
+                visible_valid = visible_flux[np.isfinite(visible_flux)]
+                if len(visible_valid) > 0:
+                    vis_min, vis_max = np.min(visible_valid), np.max(visible_valid)
+                    vis_pad = (vis_max - vis_min) * 0.15 if vis_max > vis_min else 0.5
+                    default_y_range = [vis_min - vis_pad, vis_max + vis_pad]
+                else:
+                    default_y_range = None
+
                 fig_spec.update_layout(
                     height=450,
                     margin=dict(l=10, r=10, t=30, b=10),
@@ -1871,7 +1875,7 @@ with col_main:
                         title=y_label_text, 
                         showgrid=True, gridcolor='#334155', 
                         tickfont=dict(color='#F1F5F9'),
-                        range=y_range,
+                        range=default_y_range,
                         uirevision=f"spec_{selected_galaxy_name}_{show_rest_frame}"
                     ),
                     legend=dict(
@@ -3253,29 +3257,6 @@ if st.session_state.show_tools and col_right:
                     else:
                         st.caption("Select a pixel in Kinematic Maps first")
 
-
-            # --- C. MODULES (Card Style) ---
-            with st.container(border=True):
-                st.markdown("##### 🚀 Launchers")
-                
-                def run_script(script_name, label):
-                    if os.path.exists(script_name):
-                        try:
-                            subprocess.Popen([sys.executable, script_name, fits_file_path])
-                            st.toast(f"🚀 {label} launched!", icon="✅")
-                        except Exception as e: st.error(f"Failed: {e}")
-                    else: st.error(f"Script '{script_name}' not found.")
-
-                # Using columns for buttons to make them look like a grid or full width
-                # Here we stick to full width for readability
-                if st.button("📊 Stacked Spectra", width='stretch', help="Open Spectral Stacking GUI"): 
-                    run_script("GUI_stacked_spectra.py", "Stacked Spectra")
-                    
-                if st.button("🌀 Kinematik GUI", width='stretch', help="Open W80 & Velocity Analysis"): 
-                    run_script("w80_gui copy.py", "Kinematik GUI")
-                    
-                if st.button("🔭 Ergebnisse GUI", width='stretch', help="View Final Results"): 
-                    run_script("program_runner.py", "Ergebnisse GUI")
 
             st.write("") # Small spacer
             # Only works if your streamlit version is >= 1.30
